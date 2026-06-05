@@ -175,8 +175,10 @@ install_roxctl() {
         print_info "✓ roxctl installed to ~/.local/bin/roxctl"
 
         if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
-            print_info "Adding ~/.local/bin to PATH in ~/.bashrc"
+            export PATH="$HOME/.local/bin:$PATH"
+            print_info "Added ~/.local/bin to PATH for this session"
             if ! grep -q 'export PATH="$HOME/.local/bin:$PATH"' ~/.bashrc 2>/dev/null; then
+                print_info "Persisting ~/.local/bin in ~/.bashrc"
                 echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
             fi
         fi
@@ -185,6 +187,11 @@ install_roxctl() {
     rm -rf "${temp_dir}"
 
     if command -v roxctl >/dev/null 2>&1; then
+        local version
+        version=$(roxctl version 2>/dev/null | grep "roxctl version" || echo "installed")
+        print_info "✓ roxctl successfully installed: ${version}"
+    elif [ -x "$HOME/.local/bin/roxctl" ]; then
+        export PATH="$HOME/.local/bin:$PATH"
         local version
         version=$(roxctl version 2>/dev/null | grep "roxctl version" || echo "installed")
         print_info "✓ roxctl successfully installed: ${version}"
