@@ -55,6 +55,33 @@ get_rox_endpoint() {
     echo "${url#https://}"
 }
 
+# Validate a downloaded roxctl without relying on the `file` utility (not always installed).
+validate_roxctl_binary() {
+    local bin_path="$1"
+    [ -s "${bin_path}" ] || return 1
+    chmod +x "${bin_path}"
+    "${bin_path}" version >/dev/null 2>&1
+}
+
+try_download_roxctl() {
+    local url="$1"
+    local dest="$2"
+    local use_insecure="${3:-false}"
+    local -a curl_opts=(-L -f -s -S --connect-timeout 30 --max-time 300 -o "${dest}")
+
+    if [ "${use_insecure}" = "true" ]; then
+        curl_opts=(-k "${curl_opts[@]}")
+    fi
+
+    rm -f "${dest}"
+    if curl "${curl_opts[@]}" "${url}" 2>/dev/null && validate_roxctl_binary "${dest}"; then
+        return 0
+    fi
+
+    rm -f "${dest}"
+    return 1
+}
+
 install_roxctl() {
     print_step "Installing roxctl CLI"
     echo "================================================================"
@@ -94,37 +121,36 @@ install_roxctl() {
 
     print_info "Attempting download from Red Hat mirror..."
     local mirror_url="https://mirror.openshift.com/pub/rhacs/assets/latest/bin/Linux/roxctl"
-    if curl -L -f -s -o "${temp_dir}/roxctl" "${mirror_url}" 2>/dev/null; then
-        if file "${temp_dir}/roxctl" | grep -q "executable"; then
-            print_info "✓ Successfully downloaded from Red Hat mirror"
-            download_success=true
-        else
-            print_warn "Downloaded file from mirror is not a valid executable"
-            rm -f "${temp_dir}/roxctl"
-        fi
+    if try_download_roxctl "${mirror_url}" "${temp_dir}/roxctl"; then
+        print_info "✓ Successfully downloaded from Red Hat mirror"
+        download_success=true
     else
-        print_warn "Failed to download from Red Hat mirror"
+        print_warn "Failed to download or validate roxctl from Red Hat mirror"
     fi
 
     if [ "$download_success" = false ]; then
         print_info "Attempting download from RHACS Central..."
-        local central_route
-        central_route=$(oc get route central -n "${RHACS_NAMESPACE:-stackrox}" -o jsonpath='{.spec.host}' 2>/dev/null || echo "")
-        if [ -n "${central_route}" ]; then
-            local roxctl_url="https://${central_route}/api/cli/download/roxctl-${os}"
+        local central_base="${ROX_CENTRAL_ADDRESS:-}"
+        if [ -z "${central_base}" ]; then
+            local central_route
+            central_route=$(oc get route central -n "${RHACS_NAMESPACE:-stackrox}" -o jsonpath='{.spec.host}' 2>/dev/null || echo "")
+            if [ -n "${central_route}" ]; then
+                central_base="https://${central_route}"
+            fi
+        fi
+
+        if [ -n "${central_base}" ]; then
+            local roxctl_url="${central_base%/}/api/cli/download/roxctl-${os}"
             print_info "Downloading from: ${roxctl_url}"
 
-            if curl -k -f -s -o "${temp_dir}/roxctl" "${roxctl_url}" 2>/dev/null; then
-                if file "${temp_dir}/roxctl" | grep -q "executable"; then
-                    print_info "✓ Successfully downloaded from RHACS Central"
-                    download_success=true
-                else
-                    print_warn "Downloaded file from Central is not a valid executable"
-                    rm -f "${temp_dir}/roxctl"
-                fi
+            if try_download_roxctl "${roxctl_url}" "${temp_dir}/roxctl" "true"; then
+                print_info "✓ Successfully downloaded from RHACS Central"
+                download_success=true
             else
-                print_warn "Failed to download from RHACS Central"
+                print_warn "Failed to download or validate roxctl from RHACS Central"
             fi
+        else
+            print_warn "RHACS Central URL not available for roxctl download"
         fi
     fi
 
@@ -135,16 +161,8 @@ install_roxctl() {
         print_error "Please install roxctl manually:"
         print_error "  curl -L -o /tmp/roxctl https://mirror.openshift.com/pub/rhacs/assets/latest/bin/Linux/roxctl"
         print_error "  chmod +x /tmp/roxctl"
+        print_error "  /tmp/roxctl version"
         print_error "  sudo mv /tmp/roxctl /usr/local/bin/roxctl"
-        exit 1
-    fi
-
-    chmod +x "${temp_dir}/roxctl"
-
-    if ! "${temp_dir}/roxctl" version >/dev/null 2>&1; then
-        print_error "Downloaded roxctl binary is not working correctly"
-        rm -rf "${temp_dir}"
-        setup_rerun_hint_print
         exit 1
     fi
 

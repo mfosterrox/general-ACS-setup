@@ -14,16 +14,32 @@ This repo configures an **already-installed** RHACS Central deployment. It does 
 
 ## Quick Start
 
+### First-time setup
+
 ```bash
 # 1. Set credentials in ~/.bashrc (one-time per environment)
+cat >> ~/.bashrc <<'EOF'
 export ROX_API_TOKEN="<admin-scoped-api-token>"
 export ROX_CENTRAL_ADDRESS="https://central-stackrox.apps.<cluster-domain>"
-
-# 2. Run setup
+EOF
 source ~/.bashrc
-git clone <this-repo>
+
+# 2. Clone the repo
+git clone https://github.com/mfosterrox/general-ACS-setup.git
 cd general-ACS-setup
+
+# 3. Run setup
 chmod +x install.sh verify-setup.sh basic-setup/install.sh
+./install.sh
+./verify-setup.sh
+```
+
+### Update and rerun (existing clone)
+
+```bash
+source ~/.bashrc
+cd general-ACS-setup
+git pull origin main
 ./install.sh
 ./verify-setup.sh
 ```

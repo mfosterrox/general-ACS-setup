@@ -34,17 +34,23 @@ export ROX_CENTRAL_ADDRESS="https://central-stackrox.apps.<cluster-domain>"
 
 ## Quick Start
 
-From the **project root**:
+Clone and run from the **project root** (see [main README](../README.md) for full instructions):
 
 ```bash
 source ~/.bashrc
+git clone https://github.com/mfosterrox/general-ACS-setup.git
+cd general-ACS-setup
+chmod +x install.sh verify-setup.sh basic-setup/install.sh
 ./install.sh
+./verify-setup.sh
 ```
 
-Or from **this folder**:
+Or run **basic-setup only** from this folder:
 
 ```bash
 source ~/.bashrc
+cd general-ACS-setup/basic-setup
+chmod +x install.sh
 ./install.sh
 ```
 
