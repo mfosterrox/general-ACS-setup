@@ -36,8 +36,9 @@ RHACS_NAMESPACE="${RHACS_NAMESPACE:-stackrox}"
 RHACS_ROUTE_NAME="${RHACS_ROUTE_NAME:-central}"
 RHACS_OPERATOR_NAMESPACE="${RHACS_OPERATOR_NAMESPACE:-rhacs-operator}"
 
-# Target version when set via RHACS_VERSION (empty = keep installed version, no upgrade attempt)
-RHACS_VERSION="${RHACS_VERSION:-}"
+# Default target: latest stable RHACS release (currently 4.10). Override with RHACS_VERSION or RHACS_DEFAULT_VERSION.
+RHACS_DEFAULT_VERSION="${RHACS_DEFAULT_VERSION:-4.10}"
+RHACS_VERSION="${RHACS_VERSION:-${RHACS_DEFAULT_VERSION}}"
 
 # Namespaces to search for the RHACS OLM subscription (comma- or space-separated override)
 RHACS_SUBSCRIPTION_SEARCH_NAMESPACES="${RHACS_SUBSCRIPTION_SEARCH_NAMESPACES:-${RHACS_OPERATOR_NAMESPACE} openshift-operators ${RHACS_NAMESPACE}}"
@@ -287,23 +288,19 @@ ensure_csv_deploy_version() {
 }
 
 # Function to check and update RHACS version
-# Uses RHACS_VERSION as target when set. Skips upgrade when operator catalog cannot provide target.
+# Defaults to RHACS_DEFAULT_VERSION (4.10). Skips upgrade when operator catalog cannot provide target.
 check_and_update_version() {
     print_step "Checking RHACS version..."
 
-    if [ -z "${RHACS_VERSION}" ]; then
+    if [ "${RHACS_SKIP_VERSION_UPDATE:-0}" = "1" ]; then
         local installed_only
         installed_only=$(get_installed_version)
-        if [ -n "${installed_only}" ]; then
-            print_info "RHACS_VERSION not set — keeping installed version: ${installed_only}"
-        else
-            print_info "RHACS_VERSION not set — skipping version management"
-        fi
+        print_info "RHACS_SKIP_VERSION_UPDATE=1 — keeping installed version${installed_only:+: ${installed_only}}"
         return 0
     fi
 
-    local target_version="${RHACS_VERSION}"
-    print_info "Target version: ${target_version}"
+    local target_version="${RHACS_VERSION:-${RHACS_DEFAULT_VERSION}}"
+    print_info "Target version: ${target_version} (default: ${RHACS_DEFAULT_VERSION})"
     
     # Prefer subscription channel update (subscriptions.operators.coreos.com); fall back to CSV when no subscription
     if [ -n "$(get_rhacs_subscription_name)" ]; then

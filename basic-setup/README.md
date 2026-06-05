@@ -25,7 +25,9 @@ export ROX_CENTRAL_ADDRESS="https://central-stackrox.apps.<cluster-domain>"
 |----------|---------|-------------|
 | `RHACS_NAMESPACE` | `stackrox` | RHACS install namespace |
 | `RHACS_ROUTE_NAME` | `central` | Route name for URL discovery |
-| `RHACS_VERSION` | — | Target version (e.g. `4.10`); unset = no upgrade attempt |
+| `RHACS_VERSION` | `4.10` | Target version (defaults to `RHACS_DEFAULT_VERSION`) |
+| `RHACS_DEFAULT_VERSION` | `4.10` | Latest stable default upgrade target |
+| `RHACS_SKIP_VERSION_UPDATE` | `0` | Set to `1` to skip version management |
 | `RHACS_FORCE_DOWNGRADE` | `false` | Allow downgrade to older version |
 | `SKIP_COLLECTOR_NETWORK_CONFIG` | `0` | Skip script 02 |
 | `ROX_NON_AGGREGATED_NETWORKS` | auto-detect | Manual CIDR override for collector |
@@ -85,15 +87,16 @@ curl -k -H "Authorization: Bearer $ROX_API_TOKEN" "$ROX_CENTRAL_ADDRESS/v1/auth/
 
 ## Version Management
 
-When `RHACS_VERSION` is **unset**, the script keeps the installed version and does not attempt an upgrade.
+By default the script upgrades to **4.10** (`RHACS_DEFAULT_VERSION`). Override with `RHACS_VERSION` or disable with `RHACS_SKIP_VERSION_UPDATE=1`.
 
-When `RHACS_VERSION` is set, the script upgrades only if the operator catalog can provide that version. If the catalog maxes out lower (e.g. operator has 4.9.2 but target is 4.10), the upgrade is skipped with a warning and setup continues.
+The script upgrades only if the operator catalog can provide the target version. If the catalog maxes out lower (e.g. operator has 4.9.2 but target is 4.10), the upgrade is skipped with a warning and setup continues.
 
-| Current | `RHACS_VERSION` | Catalog latest | Result |
-|---------|-----------------|----------------|--------|
-| 4.9.2 | (unset) | 4.9.2 | No upgrade |
-| 4.9.2 | 4.10 | 4.9.2 | Skipped — catalog cannot provide 4.10 |
-| 4.9.2 | 4.9 | 4.9.2 | Refuses downgrade unless `RHACS_FORCE_DOWNGRADE=true` |
+| Current | Target (default) | Catalog latest | Result |
+|---------|------------------|----------------|--------|
+| 4.9.2 | 4.10 (default) | 4.9.2 | Skipped — catalog cannot provide 4.10 |
+| 4.9.2 | 4.10 | 4.10.x | Upgrades to 4.10 |
+| 4.9.2 | — | any | No upgrade if `RHACS_SKIP_VERSION_UPDATE=1` |
+| 4.9.3 | 4.9.2 | 4.9.2 | Refuses downgrade unless `RHACS_FORCE_DOWNGRADE=true` |
 
 ## What Gets Configured
 
