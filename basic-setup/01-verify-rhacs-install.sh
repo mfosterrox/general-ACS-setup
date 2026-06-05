@@ -585,22 +585,45 @@ update_rhacs_version() {
     fi
 }
 
-# Function to ensure RHACS OpenShift Console plugin is enabled
-# On the Install Operator page, the Console plugin option should be set to Enable.
-# This function ensures the plugin is enabled in the Console operator config (idempotent).
-ensure_rhacs_console_plugin_enabled() {
-    print_step "Ensuring RHACS Console plugin is enabled..."
-
-    if ! oc get consoles.operator.openshift.io cluster &>/dev/null; then
-        print_warn "Console operator resource not found; skipping Console plugin enablement"
+# RHACS operator CSV declares console.openshift.io/plugins (typically advanced-cluster-security).
+get_rhacs_console_plugin_from_csv() {
+    local csv_name csv_ns plugins_json
+    csv_name=$(get_rhacs_csv_name)
+    csv_ns=$(get_rhacs_csv_namespace)
+    if [ -z "${csv_name}" ]; then
+        return 1
+    fi
+    plugins_json=$(oc get csv "${csv_name}" -n "${csv_ns}" -o jsonpath='{.metadata.annotations.console\.openshift\.io/plugins}' 2>/dev/null || echo "")
+    if [ -n "${plugins_json}" ] && command -v jq &>/dev/null; then
+        echo "${plugins_json}" | jq -r '.[0] // empty' 2>/dev/null
         return 0
     fi
+    return 1
+}
 
-    # Find the RHACS ConsolePlugin name (operator may create "acs" or similar)
-    local plugin_name=""
+# Discover ConsolePlugin CR name (cluster-scoped). RHACS uses advanced-cluster-security in current operator bundles.
+find_rhacs_console_plugin_name() {
+    local candidate name
+
+    if [ -n "${RHACS_CONSOLE_PLUGIN_NAME:-}" ]; then
+        if oc get consoleplugin "${RHACS_CONSOLE_PLUGIN_NAME}" &>/dev/null; then
+            echo "${RHACS_CONSOLE_PLUGIN_NAME}"
+            return 0
+        fi
+        print_warn "RHACS_CONSOLE_PLUGIN_NAME=${RHACS_CONSOLE_PLUGIN_NAME} set but ConsolePlugin not found"
+    fi
+
+    for candidate in advanced-cluster-security acs rhacs; do
+        if oc get consoleplugin "${candidate}" &>/dev/null; then
+            echo "${candidate}"
+            return 0
+        fi
+    done
+
     if command -v jq &>/dev/null && oc get consoleplugins -o json &>/dev/null; then
-        plugin_name=$(oc get consoleplugins -o json 2>/dev/null | jq -r '
+        name=$(oc get consoleplugins -o json 2>/dev/null | jq -r '
             .items[] | select(
+                .metadata.name == "advanced-cluster-security" or
                 .metadata.name == "acs" or
                 .metadata.name == "rhacs" or
                 (.spec.displayName != null and (
@@ -609,45 +632,109 @@ ensure_rhacs_console_plugin_enabled() {
                 ))
             ) | .metadata.name
         ' 2>/dev/null | head -1)
-    fi
-
-    if [ -z "${plugin_name}" ]; then
-        # Fallback: try common name used by RHACS operator
-        if oc get consoleplugin acs &>/dev/null; then
-            plugin_name="acs"
+        if [ -n "${name}" ]; then
+            echo "${name}"
+            return 0
         fi
     fi
 
-    if [ -z "${plugin_name}" ]; then
-        print_warn "RHACS ConsolePlugin not found; operator may not register a console plugin in this version; skipping"
+    name=$(get_rhacs_console_plugin_from_csv 2>/dev/null || true)
+    if [ -n "${name}" ]; then
+        echo "${name}"
         return 0
     fi
 
-    local current_plugins
-    current_plugins=$(oc get consoles.operator.openshift.io cluster -o jsonpath='{.spec.plugins[*]}' 2>/dev/null || echo "")
-    if echo "${current_plugins}" | tr ' ' '\n' | grep -q "^${plugin_name}$"; then
+    return 1
+}
+
+wait_for_rhacs_console_plugin() {
+    local max_wait="${RHACS_CONSOLE_PLUGIN_WAIT_SEC:-180}"
+    local elapsed=0
+    local plugin_name=""
+
+    print_info "Waiting for RHACS ConsolePlugin (up to ${max_wait}s; deployed with SecuredCluster)..."
+    while [ "${elapsed}" -lt "${max_wait}" ]; do
+        plugin_name=$(find_rhacs_console_plugin_name 2>/dev/null || true)
+        if [ -n "${plugin_name}" ] && oc get consoleplugin "${plugin_name}" &>/dev/null; then
+            echo "${plugin_name}"
+            return 0
+        fi
+        sleep 10
+        elapsed=$((elapsed + 10))
+    done
+    return 1
+}
+
+enable_plugin_in_console_operator() {
+    local plugin_name="$1"
+    local console_json patched
+
+    if ! command -v jq &>/dev/null; then
+        print_error "jq is required to enable the RHACS Console plugin"
+        return 1
+    fi
+
+    console_json=$(oc get consoles.operator.openshift.io cluster -o json 2>/dev/null || echo "")
+    if [ -z "${console_json}" ]; then
+        print_warn "Could not read consoles.operator.openshift.io/cluster"
+        return 1
+    fi
+
+    if echo "${console_json}" | jq -e --arg p "${plugin_name}" '.spec.plugins[]? | select(. == $p)' &>/dev/null; then
         print_info "✓ RHACS Console plugin '${plugin_name}' is already enabled"
         return 0
     fi
 
-    # Build new plugins array: existing + RHACS plugin
-    local new_plugins_json
-    local current_json
-    current_json=$(oc get consoles.operator.openshift.io cluster -o jsonpath='{.spec.plugins}' 2>/dev/null || echo "[]")
-    if [ -z "${current_json}" ] || [ "${current_json}" = "[]" ]; then
-        new_plugins_json="[\"${plugin_name}\"]"
-    elif command -v jq &>/dev/null; then
-        new_plugins_json=$(echo "${current_json}" | jq --arg p "${plugin_name}" '. + [$p] | unique' -c 2>/dev/null || echo "[\"${plugin_name}\"]")
-    else
-        # Without jq: append to existing JSON array (e.g. ["a","b"] -> ["a","b","acs"])
-        new_plugins_json="${current_json%]},\"${plugin_name}\"]"
+    if echo "${console_json}" | jq -e '.spec.plugins | type == "array"' &>/dev/null; then
+        if oc patch consoles.operator.openshift.io cluster --type=json \
+            -p="[{\"op\":\"add\",\"path\":\"/spec/plugins/-\",\"value\":\"${plugin_name}\"}]" 2>/dev/null; then
+            print_info "✓ RHACS Console plugin '${plugin_name}' enabled in OpenShift Console"
+            return 0
+        fi
     fi
 
-    if oc patch consoles.operator.openshift.io cluster --type=merge -p '{"spec":{"plugins":'"${new_plugins_json}"'}}' 2>/dev/null; then
+    patched=$(echo "${console_json}" | jq --arg p "${plugin_name}" '.spec.plugins = ((.spec.plugins // []) + [$p] | unique)' -c)
+    if oc patch consoles.operator.openshift.io cluster --type=merge -p "{\"spec\":{\"plugins\":$(echo "${patched}" | jq -c '.spec.plugins')}}" 2>/dev/null; then
         print_info "✓ RHACS Console plugin '${plugin_name}' enabled in OpenShift Console"
-    else
-        print_warn "Could not patch Console to enable plugin '${plugin_name}'; may require cluster-admin"
+        return 0
     fi
+
+    print_warn "Could not patch Console to enable plugin '${plugin_name}'; requires cluster-admin"
+    return 1
+}
+
+# Ensure RHACS OpenShift Console plugin is registered (ConsolePlugin CR) and enabled in console-operator.
+ensure_rhacs_console_plugin_enabled() {
+    print_step "Ensuring RHACS Console plugin is enabled..."
+
+    if ! oc get consoles.operator.openshift.io cluster &>/dev/null; then
+        print_warn "Console operator resource not found; skipping Console plugin enablement"
+        return 0
+    fi
+
+    local plugin_name installed_mm
+    plugin_name=$(find_rhacs_console_plugin_name 2>/dev/null || true)
+
+    if [ -z "${plugin_name}" ] || ! oc get consoleplugin "${plugin_name}" &>/dev/null; then
+        plugin_name=$(wait_for_rhacs_console_plugin 2>/dev/null || true)
+    fi
+
+    if [ -z "${plugin_name}" ] || ! oc get consoleplugin "${plugin_name}" &>/dev/null; then
+        installed_mm=$(extract_major_minor "$(get_installed_version 2>/dev/null || echo "")")
+        print_warn "RHACS ConsolePlugin CR not found on the cluster"
+        if [ -n "${installed_mm}" ] && version_gt "4.10" "${installed_mm}"; then
+            print_warn "OpenShift console integration requires RHACS 4.10+ (installed: ${installed_mm})"
+        else
+            print_warn "Ensure a SecuredCluster is installed and the RHACS Operator was installed with Console plugin enabled"
+            print_warn "Operator UI: Installed Operators → RHACS → Console plugin → Enable"
+            print_warn "Or reinstall operator with Console plugin enabled; plugin name is typically: advanced-cluster-security"
+        fi
+        print_info "After ConsolePlugin exists, rerun: bash basic-setup/01-verify-rhacs-install.sh"
+        return 0
+    fi
+
+    print_info "Found ConsolePlugin: ${plugin_name}"
+    enable_plugin_in_console_operator "${plugin_name}"
 }
 
 # Main function

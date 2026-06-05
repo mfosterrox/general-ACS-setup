@@ -31,6 +31,8 @@ export ROX_CENTRAL_ADDRESS="https://central-stackrox.apps.<cluster-domain>"
 | `ROX_NON_AGGREGATED_NETWORKS` | auto-detect | Manual CIDR override for collector |
 | `SECURED_CLUSTER_NAME` | auto | SecuredCluster CR name override |
 | `ALLOW_PASSWORD_TOKEN_GEN` | `0` | Deprecated password-based token fallback |
+| `RHACS_CONSOLE_PLUGIN_NAME` | auto | Override ConsolePlugin name (default: `advanced-cluster-security`) |
+| `RHACS_CONSOLE_PLUGIN_WAIT_SEC` | `180` | Seconds to wait for ConsolePlugin after SecuredCluster install |
 
 ## Quick Start
 
