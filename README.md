@@ -54,6 +54,10 @@ git pull origin main
 | `RHACS_ROUTE_NAME` | No | `central` | OpenShift route name for Central |
 | `RHACS_VERSION` | No | `4.10` | Target version (defaults to latest stable via `RHACS_DEFAULT_VERSION`) |
 | `RHACS_DEFAULT_VERSION` | No | `4.10` | Default upgrade target when `RHACS_VERSION` is unset |
+| `RHACS_OPERATOR_CHANNEL` | No | `stable` | OLM subscription channel — **exported by default** so upgrades target RHACS 4.10 |
+| `RHACS_USE_VERSION_PINNED_CHANNEL` | No | `0` | Set to `1` to use `rhacs-X.Y` channel names instead of `stable` |
+| `RHACS_CONSOLE_PLUGIN_NAME` | No | `advanced-cluster-security` | OpenShift Console security plugin (4.10 vulnerability/VM views) |
+| `RHACS_ENSURE_CONSOLE_PLUGIN` | No | `1` | Set to `0` to skip enabling the Console security plugin |
 | `RHACS_SKIP_VERSION_UPDATE` | No | `0` | Set to `1` to keep installed version (no upgrade attempt) |
 | `RHACS_FORCE_DOWNGRADE` | No | `false` | Allow downgrade when `RHACS_VERSION` is older |
 | `SKIP_COLLECTOR_NETWORK_CONFIG` | No | `0` | Set to `1` to skip script 02 |

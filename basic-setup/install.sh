@@ -246,6 +246,14 @@ add_bashrc_vars_from_cluster() {
     fi
 }
 
+export_rhacs_setup_defaults() {
+    export RHACS_DEFAULT_VERSION="${RHACS_DEFAULT_VERSION:-4.10}"
+    export RHACS_VERSION="${RHACS_VERSION:-${RHACS_DEFAULT_VERSION}}"
+    export RHACS_OPERATOR_CHANNEL="${RHACS_OPERATOR_CHANNEL:-stable}"
+    export RHACS_CONSOLE_PLUGIN_NAME="${RHACS_CONSOLE_PLUGIN_NAME:-advanced-cluster-security}"
+    export RHACS_ENSURE_CONSOLE_PLUGIN="${RHACS_ENSURE_CONSOLE_PLUGIN:-1}"
+}
+
 export_bashrc_vars() {
     local vars=(ROX_CENTRAL_ADDRESS ROX_API_TOKEN RHACS_NAMESPACE RHACS_ROUTE_NAME KUBECONFIG GUID CLOUDUSER)
     [ ! -f ~/.bashrc ] && return 0
@@ -375,11 +383,8 @@ main() {
         export RHACS_ROUTE_NAME="central"
     fi
 
-    if [ -n "${RHACS_VERSION:-}" ]; then
-        print_info "Target RHACS version specified: ${RHACS_VERSION}"
-    else
-        print_info "No target RHACS version specified - will use currently installed version"
-    fi
+    export_rhacs_setup_defaults
+    print_info "RHACS upgrade defaults: version=${RHACS_VERSION}, operator channel=${RHACS_OPERATOR_CHANNEL}, console plugin=${RHACS_CONSOLE_PLUGIN_NAME}"
 
     echo ""
 
@@ -426,6 +431,7 @@ main() {
     fi
 
     export_bashrc_vars || true
+    export_rhacs_setup_defaults
 
     print_info "Verifying cluster connectivity..."
     if ! oc whoami &>/dev/null; then

@@ -36,9 +36,15 @@ RHACS_NAMESPACE="${RHACS_NAMESPACE:-stackrox}"
 RHACS_ROUTE_NAME="${RHACS_ROUTE_NAME:-central}"
 RHACS_OPERATOR_NAMESPACE="${RHACS_OPERATOR_NAMESPACE:-rhacs-operator}"
 
-# Default target: latest stable RHACS release (currently 4.10). Override with RHACS_VERSION or RHACS_DEFAULT_VERSION.
-RHACS_DEFAULT_VERSION="${RHACS_DEFAULT_VERSION:-4.10}"
-RHACS_VERSION="${RHACS_VERSION:-${RHACS_DEFAULT_VERSION}}"
+# Default target: RHACS 4.10 on the OLM stable channel (Red Hat upgrade docs).
+# Override before running: RHACS_VERSION, RHACS_OPERATOR_CHANNEL, RHACS_SKIP_VERSION_UPDATE=1
+export RHACS_DEFAULT_VERSION="${RHACS_DEFAULT_VERSION:-4.10}"
+export RHACS_VERSION="${RHACS_VERSION:-${RHACS_DEFAULT_VERSION}}"
+export RHACS_OPERATOR_CHANNEL="${RHACS_OPERATOR_CHANNEL:-stable}"
+
+# OpenShift Console security plugin (4.10+; includes vulnerability views for workloads and VMs).
+export RHACS_CONSOLE_PLUGIN_NAME="${RHACS_CONSOLE_PLUGIN_NAME:-advanced-cluster-security}"
+export RHACS_ENSURE_CONSOLE_PLUGIN="${RHACS_ENSURE_CONSOLE_PLUGIN:-1}"
 
 # Namespaces to search for the RHACS OLM subscription (comma- or space-separated override)
 RHACS_SUBSCRIPTION_SEARCH_NAMESPACES="${RHACS_SUBSCRIPTION_SEARCH_NAMESPACES:-${RHACS_OPERATOR_NAMESPACE} openshift-operators ${RHACS_NAMESPACE}}"
@@ -85,8 +91,32 @@ get_installed_version() {
     fi
 }
 
-# Function to get latest available RHACS version from operator (CSV).
-# Returns the version the operator can provide (e.g. from CSV metadata).
+# Parse a version from an OLM CSV name (e.g. rhacs-operator.v4.10.2 -> 4.10.2).
+version_from_csv_name() {
+    local csv_name="$1"
+    if [[ "${csv_name}" =~ v([0-9]+\.[0-9]+(\.[0-9]+)?) ]]; then
+        echo "${BASH_REMATCH[1]}"
+    fi
+}
+
+# List channels advertised for rhacs-operator in the openshift-marketplace catalog.
+list_rhacs_operator_channels() {
+    oc get packagemanifest rhacs-operator -n openshift-marketplace -o json 2>/dev/null \
+        | jq -r '.status.channels[].name' 2>/dev/null | sort -u | tr '\n' ' '
+}
+
+# Max RHACS version available on a given OLM channel in the catalog (before install).
+get_catalog_version_for_channel() {
+    local channel="${1:-stable}"
+    local csv_name
+    csv_name=$(oc get packagemanifest rhacs-operator -n openshift-marketplace -o json 2>/dev/null \
+        | jq -r --arg ch "${channel}" '.status.channels[] | select(.name == $ch) | .currentCSV' 2>/dev/null | head -1)
+    if [ -n "${csv_name}" ]; then
+        version_from_csv_name "${csv_name}"
+    fi
+}
+
+# Function to get latest available RHACS version from the installed operator CSV.
 get_latest_available_version() {
     local csv_name
     csv_name=$(get_rhacs_csv_name)
@@ -96,13 +126,20 @@ get_latest_available_version() {
     fi
     local csv_ns
     csv_ns=$(get_rhacs_csv_namespace)
-    # CSV name format: rhacs-operator.v4.10.0 or similar
-    if [[ "${csv_name}" =~ \.v?([0-9]+\.[0-9]+\.[0-9]+) ]]; then
-        echo "${BASH_REMATCH[1]}"
-    else
-        # Try spec.version from CSV
-        oc get csv "${csv_name}" -n "${csv_ns}" -o jsonpath='{.spec.version}' 2>/dev/null || get_version_from_deployment_label
+    local ver
+    ver=$(version_from_csv_name "${csv_name}")
+    if [ -n "${ver}" ]; then
+        echo "${ver}"
+        return
     fi
+    oc get csv "${csv_name}" -n "${csv_ns}" -o jsonpath='{.spec.version}' 2>/dev/null || get_version_from_deployment_label
+}
+
+# Best-effort max version the catalog can provide on the target operator channel.
+get_target_channel_catalog_version() {
+    local channel
+    channel=$(get_channel_for_version "${RHACS_VERSION:-${RHACS_DEFAULT_VERSION}}")
+    get_catalog_version_for_channel "${channel}"
 }
 
 
@@ -323,11 +360,20 @@ check_and_update_version() {
         print_info "Installed RHACS version: ${installed_version}"
     fi
     
-    # Latest from operator (after channel switch; informational)
-    local latest_version
-    latest_version=$(get_latest_available_version)
-    if [ -n "${latest_version}" ]; then
-        print_info "Latest available version from operator: ${latest_version}"
+    local operator_channel
+    operator_channel=$(get_channel_for_version "${target_version}")
+    print_info "Operator channel: ${operator_channel}"
+
+    local catalog_version installed_csv_version latest_version
+    catalog_version=$(get_catalog_version_for_channel "${operator_channel}")
+    installed_csv_version=$(get_latest_available_version)
+    latest_version="${catalog_version:-${installed_csv_version}}"
+
+    if [ -n "${catalog_version}" ]; then
+        print_info "Catalog version on channel ${operator_channel}: ${catalog_version}"
+    fi
+    if [ -n "${installed_csv_version}" ]; then
+        print_info "Installed operator CSV version: ${installed_csv_version}"
     fi
 
     local target_major_minor
@@ -338,8 +384,9 @@ check_and_update_version() {
     if [ -n "${latest_version}" ]; then
         latest_major_minor=$(extract_major_minor "${latest_version}")
         if version_gt "${target_major_minor}" "${latest_major_minor}"; then
-            print_warn "Target ${target_version} is not available from the installed operator catalog (latest: ${latest_version})"
-            print_warn "Skipping upgrade. Install a newer RHACS operator catalog or set RHACS_VERSION=${latest_major_minor}"
+            print_warn "Target ${target_version} is not available on channel ${operator_channel} (catalog max: ${latest_version})"
+            print_warn "Available operator channels: $(list_rhacs_operator_channels)"
+            print_warn "Skipping upgrade. Refresh the cluster catalog or set RHACS_OPERATOR_CHANNEL to a channel that provides 4.10"
             print_info "Continuing setup with installed version: ${installed_version}"
             return 0
         fi
@@ -347,7 +394,7 @@ check_and_update_version() {
     
     # Already at target: same minor = stable (4.10.x follows 4.10 channel)
     if [ "${installed_version}" != "unknown" ] && [ "${target_major_minor}" = "${installed_major_minor}" ]; then
-        print_info "✓ RHACS is already on ${target_version} channel (installed: ${installed_version})"
+        print_info "✓ RHACS is already at target version ${target_version} (installed: ${installed_version})"
         return 0
     fi
     
@@ -371,17 +418,18 @@ check_and_update_version() {
     update_rhacs_version "${target_version}"
 }
 
-# Map target minor version to operator channel (e.g. 4.10 -> rhacs-4.10)
-# Red Hat catalog uses rhacs-4.x channel names.
+# Operator OLM channel for upgrades. Default stable (4.10); use rhacs-X.Y only when explicitly pinned.
 get_channel_for_version() {
-    local ver=$1
-    local major_minor=""
-    if [[ "${ver}" =~ ^([0-9]+\.[0-9]+) ]]; then
-        major_minor="${BASH_REMATCH[1]}"
+    local ver="$1"
+
+    if [ "${RHACS_USE_VERSION_PINNED_CHANNEL:-0}" = "1" ]; then
+        local major_minor
+        major_minor=$(extract_major_minor "${ver}")
         echo "rhacs-${major_minor}"
-    else
-        echo "rhacs-4.10"
+        return 0
     fi
+
+    echo "${RHACS_OPERATOR_CHANNEL:-stable}"
 }
 
 # Extract major.minor from a version string (4.10.0 -> 4.10).
@@ -438,22 +486,37 @@ ensure_subscription_channel_for_version() {
     sub_name=$(get_rhacs_subscription_name)
     sub_ns=$(get_rhacs_subscription_namespace)
     if [ -z "${sub_name}" ]; then
-        print_info "No RHACS subscription found (searched: ${RHACS_SUBSCRIPTION_SEARCH_NAMESPACES}); skipping subscription channel update"
+        print_warn "No RHACS subscription found (searched: ${RHACS_SUBSCRIPTION_SEARCH_NAMESPACES})"
+        print_warn "Find it with: oc get subscription -A | grep rhacs"
+        print_warn "Without a subscription, the operator channel cannot switch to stable/4.10"
         return 1
     fi
+
+    local catalog_csv catalog_ver
+    catalog_csv=$(oc get packagemanifest rhacs-operator -n openshift-marketplace -o json 2>/dev/null \
+        | jq -r --arg ch "${desired_channel}" '.status.channels[] | select(.name == $ch) | .currentCSV' 2>/dev/null | head -1)
+    catalog_ver=$(version_from_csv_name "${catalog_csv}")
+    if [ -z "${catalog_csv}" ]; then
+        print_warn "Channel '${desired_channel}' not found in openshift-marketplace catalog"
+        print_warn "Available channels: $(list_rhacs_operator_channels)"
+        return 1
+    fi
+    print_info "Catalog CSV for channel ${desired_channel}: ${catalog_csv} (${catalog_ver:-unknown})"
+
     local current_channel
     current_channel=$(oc get subscriptions.operators.coreos.com "${sub_name}" -n "${sub_ns}" -o jsonpath='{.spec.channel}' 2>/dev/null || echo "")
     if [ "${current_channel}" = "${desired_channel}" ]; then
         print_info "Subscription already on channel: ${desired_channel} (namespace ${sub_ns})"
         return 2
     fi
-    print_step "Setting subscription channel: ${current_channel:-unknown} -> ${desired_channel} for version ${target_version} (namespace ${sub_ns})..."
+    print_step "Setting subscription channel: ${current_channel:-unknown} -> ${desired_channel} (namespace ${sub_ns})..."
     if ! oc patch subscriptions.operators.coreos.com "${sub_name}" -n "${sub_ns}" --type=json -p="[{\"op\":\"replace\",\"path\":\"/spec/channel\",\"value\":\"${desired_channel}\"}]" 2>/dev/null; then
         print_warn "Could not set subscription channel to ${desired_channel}"
         return 1
     fi
-    print_info "Waiting for operator to reconcile to ${desired_channel}, 60s..."
-    sleep 60
+    local wait_sec="${RHACS_CHANNEL_RECONCILE_WAIT_SEC:-120}"
+    print_info "Waiting ${wait_sec}s for OLM to reconcile channel ${desired_channel}..."
+    sleep "${wait_sec}"
     return 0
 }
 
@@ -583,7 +646,7 @@ update_rhacs_version() {
 }
 
 # RHACS operator CSV declares console.openshift.io/plugins (typically advanced-cluster-security).
-get_rhacs_console_plugin_from_csv() {
+get_rhacs_console_plugins_from_csv() {
     local csv_name csv_ns plugins_json
     csv_name=$(get_rhacs_csv_name)
     csv_ns=$(get_rhacs_csv_namespace)
@@ -592,10 +655,14 @@ get_rhacs_console_plugin_from_csv() {
     fi
     plugins_json=$(oc get csv "${csv_name}" -n "${csv_ns}" -o jsonpath='{.metadata.annotations.console\.openshift\.io/plugins}' 2>/dev/null || echo "")
     if [ -n "${plugins_json}" ] && command -v jq &>/dev/null; then
-        echo "${plugins_json}" | jq -r '.[0] // empty' 2>/dev/null
+        echo "${plugins_json}" | jq -r '.[]? // empty' 2>/dev/null
         return 0
     fi
     return 1
+}
+
+get_rhacs_console_plugin_from_csv() {
+    get_rhacs_console_plugins_from_csv 2>/dev/null | head -1
 }
 
 # Discover ConsolePlugin CR name (cluster-scoped). RHACS uses advanced-cluster-security in current operator bundles.
@@ -700,44 +767,126 @@ enable_plugin_in_console_operator() {
     return 1
 }
 
-# Ensure RHACS OpenShift Console plugin is registered (ConsolePlugin CR) and enabled in console-operator.
+enable_plugins_in_console_operator() {
+    local plugin enabled=0 failed=0
+    for plugin in "$@"; do
+        [ -n "${plugin}" ] || continue
+        if enable_plugin_in_console_operator "${plugin}"; then
+            enabled=$((enabled + 1))
+        else
+            failed=$((failed + 1))
+        fi
+    done
+    [ "${failed}" -eq 0 ] && [ "${enabled}" -gt 0 ]
+}
+
+collect_rhacs_console_plugin_names() {
+    local -a plugins=()
+    local plugin discovered
+
+    if [ -n "${RHACS_CONSOLE_PLUGIN_NAME:-}" ]; then
+        plugins+=("${RHACS_CONSOLE_PLUGIN_NAME}")
+    fi
+
+    while IFS= read -r plugin; do
+        [ -n "${plugin}" ] && plugins+=("${plugin}")
+    done < <(get_rhacs_console_plugins_from_csv 2>/dev/null || true)
+
+    plugin=$(find_rhacs_console_plugin_name 2>/dev/null || true)
+    [ -n "${plugin}" ] && plugins+=("${plugin}")
+
+    for plugin in advanced-cluster-security acs rhacs; do
+        plugins+=("${plugin}")
+    done
+
+    printf '%s\n' "${plugins[@]}" | awk 'NF && !seen[$0]++'
+}
+
+wait_for_rhacs_target_version() {
+    local target_mm="${1:-4.10}"
+    local max_wait="${RHACS_VERSION_WAIT_SEC:-600}"
+    local elapsed=0 installed_mm
+
+    print_info "Waiting for RHACS ${target_mm} before enabling Console plugin (up to ${max_wait}s)..."
+    while [ "${elapsed}" -lt "${max_wait}" ]; do
+        installed_mm=$(extract_major_minor "$(get_installed_version 2>/dev/null || echo "")")
+        if [ -n "${installed_mm}" ] && ! version_gt "${target_mm}" "${installed_mm}"; then
+            print_info "✓ RHACS at ${installed_mm} (target ${target_mm})"
+            return 0
+        fi
+        sleep 15
+        elapsed=$((elapsed + 15))
+    done
+    print_warn "RHACS not at ${target_mm} yet after ${max_wait}s; Console plugin may be unavailable until upgrade completes"
+    return 1
+}
+
+# Ensure RHACS OpenShift Console security plugin is registered and enabled (4.10+ vulnerability/VM views).
 ensure_rhacs_console_plugin_enabled() {
-    print_step "Ensuring RHACS Console plugin is enabled..."
+    if [ "${RHACS_ENSURE_CONSOLE_PLUGIN:-1}" != "1" ]; then
+        print_info "Skipping Console plugin enablement (RHACS_ENSURE_CONSOLE_PLUGIN=${RHACS_ENSURE_CONSOLE_PLUGIN})"
+        return 0
+    fi
+
+    print_step "Ensuring RHACS OpenShift Console security plugin is enabled..."
 
     if ! oc get consoles.operator.openshift.io cluster &>/dev/null; then
         print_warn "Console operator resource not found; skipping Console plugin enablement"
         return 0
     fi
 
-    local plugin_name installed_mm
-    plugin_name=$(find_rhacs_console_plugin_name 2>/dev/null || true)
+    local target_mm plugin_name installed_mm plugin_names=() discovered_plugins=()
+    target_mm=$(extract_major_minor "${RHACS_VERSION:-${RHACS_DEFAULT_VERSION}}")
+    wait_for_rhacs_target_version "${target_mm}" || true
 
+    mapfile -t plugin_names < <(collect_rhacs_console_plugin_names)
+
+    plugin_name=$(find_rhacs_console_plugin_name 2>/dev/null || true)
     if [ -z "${plugin_name}" ] || ! oc get consoleplugin "${plugin_name}" &>/dev/null; then
         plugin_name=$(wait_for_rhacs_console_plugin 2>/dev/null || true)
     fi
 
-    if [ -z "${plugin_name}" ] || ! oc get consoleplugin "${plugin_name}" &>/dev/null; then
+    if [ -n "${plugin_name}" ] && oc get consoleplugin "${plugin_name}" &>/dev/null; then
+        print_info "Found ConsolePlugin CR: ${plugin_name}"
+        discovered_plugins=("${plugin_name}")
+    else
         installed_mm=$(extract_major_minor "$(get_installed_version 2>/dev/null || echo "")")
-        print_warn "RHACS ConsolePlugin CR not found on the cluster"
-        if [ -n "${installed_mm}" ] && version_gt "4.10" "${installed_mm}"; then
-            print_warn "OpenShift console integration requires RHACS 4.10+ (installed: ${installed_mm})"
+        print_warn "ConsolePlugin CR not found yet (expected: ${RHACS_CONSOLE_PLUGIN_NAME})"
+        if [ -n "${installed_mm}" ] && version_gt "${target_mm}" "${installed_mm}"; then
+            print_warn "Console security plugin requires RHACS ${target_mm}+ (installed: ${installed_mm})"
+            print_warn "Complete the operator upgrade on channel ${RHACS_OPERATOR_CHANNEL:-stable}, then rerun this script"
         else
-            print_warn "Ensure a SecuredCluster is installed and the RHACS Operator was installed with Console plugin enabled"
-            print_warn "Operator UI: Installed Operators → RHACS → Console plugin → Enable"
-            print_warn "Or reinstall operator with Console plugin enabled; plugin name is typically: advanced-cluster-security"
+            print_warn "Plugin CR is created by the RHACS Operator after upgrade; enabling by name in consoles.operator.openshift.io"
         fi
-        print_info "After ConsolePlugin exists, rerun: bash basic-setup/01-verify-rhacs-install.sh"
+        discovered_plugins=("${RHACS_CONSOLE_PLUGIN_NAME}")
+    fi
+
+    local -a to_enable=()
+    local candidate
+    for candidate in "${discovered_plugins[@]}" "${plugin_names[@]}"; do
+        [ -n "${candidate}" ] && to_enable+=("${candidate}")
+    done
+
+    if [ "${#to_enable[@]}" -eq 0 ]; then
+        to_enable=("${RHACS_CONSOLE_PLUGIN_NAME}")
+    fi
+
+    mapfile -t to_enable < <(printf '%s\n' "${to_enable[@]}" | awk 'NF && !seen[$0]++')
+
+    if enable_plugins_in_console_operator "${to_enable[@]}"; then
+        print_info "✓ RHACS Console security plugin enablement complete"
         return 0
     fi
 
-    print_info "Found ConsolePlugin: ${plugin_name}"
-    enable_plugin_in_console_operator "${plugin_name}"
+    print_info "After upgrade to ${target_mm} and ConsolePlugin CR creation, rerun: bash basic-setup/01-verify-rhacs-install.sh"
+    return 0
 }
 
 # Main function
 main() {
     print_info "RHACS Installation Verification"
     print_info "================================="
+    print_info "Defaults: version=${RHACS_VERSION}, operator channel=${RHACS_OPERATOR_CHANNEL}, console plugin=${RHACS_CONSOLE_PLUGIN_NAME}"
     
     # Verify RHACS installation
     if ! verify_rhacs_installation; then

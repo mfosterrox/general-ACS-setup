@@ -113,6 +113,22 @@ verify_basic() {
         WARNINGS=$((WARNINGS + 1))
     fi
 
+    local plugin_name="${RHACS_CONSOLE_PLUGIN_NAME:-advanced-cluster-security}"
+    if oc get consoleplugin "${plugin_name}" &>/dev/null; then
+        print_ok "ConsolePlugin CR '${plugin_name}' exists"
+        local enabled_plugins
+        enabled_plugins=$(oc get consoles.operator.openshift.io cluster -o jsonpath='{.spec.plugins[*]}' 2>/dev/null || echo "")
+        if echo "${enabled_plugins}" | tr ' ' '\n' | grep -qx "${plugin_name}"; then
+            print_ok "RHACS Console security plugin enabled in OpenShift Console"
+        else
+            print_warn "ConsolePlugin exists but '${plugin_name}' not in consoles.operator.openshift.io spec.plugins"
+            WARNINGS=$((WARNINGS + 1))
+        fi
+    else
+        print_warn "ConsolePlugin '${plugin_name}' not found (requires RHACS 4.10+ on channel stable)"
+        WARNINGS=$((WARNINGS + 1))
+    fi
+
     if oc get ds collector -n "${RHACS_NAMESPACE}" &>/dev/null; then
         local collector_networks
         collector_networks=$(oc get ds collector -n "${RHACS_NAMESPACE}" -o json 2>/dev/null | jq -r '
