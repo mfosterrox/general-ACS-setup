@@ -117,18 +117,49 @@ verify_basic() {
     fi
 
     local plugin_name="${RHACS_CONSOLE_PLUGIN_NAME:-advanced-cluster-security}"
+    local ocp_ver="${RHACS_CONSOLE_PLUGIN_MIN_OCP:-4.19}"
+    local cluster_ver
+    cluster_ver=$(oc get clusterversion version -o jsonpath='{.status.desired.version}' 2>/dev/null || echo "")
+    if [ -n "${cluster_ver}" ]; then
+        local cluster_mm min_mm
+        cluster_mm=$(echo "${cluster_ver}" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
+        min_mm="${ocp_ver}"
+        if [ "$(printf '%s\n' "${min_mm}" "${cluster_mm}" | sort -V | tail -1)" != "${cluster_mm}" ]; then
+            print_warn "OpenShift ${cluster_ver} is below ${min_mm} — RHACS console security plugin requires OCP ${min_mm}+"
+            WARNINGS=$((WARNINGS + 1))
+        else
+            print_ok "OpenShift ${cluster_ver} meets console plugin version requirement (${min_mm}+)"
+        fi
+    fi
+
+    if oc get securedcluster -n "${RHACS_NAMESPACE}" -o name &>/dev/null; then
+        :
+    else
+        print_warn "No SecuredCluster in ${RHACS_NAMESPACE} — ConsolePlugin is deployed with SecuredCluster, not Central alone"
+        WARNINGS=$((WARNINGS + 1))
+    fi
+
     if oc get consoleplugin "${plugin_name}" &>/dev/null; then
         print_ok "ConsolePlugin CR '${plugin_name}' exists"
         local enabled_plugins
         enabled_plugins=$(oc get consoles.operator.openshift.io cluster -o jsonpath='{.spec.plugins[*]}' 2>/dev/null || echo "")
         if echo "${enabled_plugins}" | tr ' ' '\n' | grep -qx "${plugin_name}"; then
             print_ok "RHACS Console security plugin enabled in OpenShift Console"
+            local console_ready console_desired
+            console_ready=$(oc get deployment console -n openshift-console -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
+            console_desired=$(oc get deployment console -n openshift-console -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "1")
+            if [ "${console_ready:-0}" -ge "${console_desired:-1}" ] 2>/dev/null; then
+                print_ok "OpenShift Console deployment ready (${console_ready}/${console_desired})"
+            else
+                print_warn "OpenShift Console not fully ready (${console_ready:-0}/${console_desired}) — wait for rollout after enabling plugin"
+                WARNINGS=$((WARNINGS + 1))
+            fi
         else
             print_warn "ConsolePlugin exists but '${plugin_name}' not in consoles.operator.openshift.io spec.plugins"
             WARNINGS=$((WARNINGS + 1))
         fi
     else
-        print_warn "ConsolePlugin '${plugin_name}' not found (requires RHACS 4.10+ on channel stable)"
+        print_warn "ConsolePlugin '${plugin_name}' not found (requires RHACS 4.10+ SecuredCluster on this cluster)"
         WARNINGS=$((WARNINGS + 1))
     fi
 

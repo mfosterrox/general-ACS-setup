@@ -133,6 +133,33 @@ source ~/.bashrc
 ./install.sh
 ```
 
+### OpenShift Console security plugin not showing
+
+The RHACS 4.10 console integration requires **all** of the following on the **same** OpenShift cluster:
+
+1. **OpenShift 4.19+** (per [RHACS 4.10 docs](https://docs.redhat.com/en/documentation/red_hat_advanced_cluster_security_for_kubernetes/4.10/html/configuring/accessing-vulnerability-information-in-web-console))
+2. **RHACS 4.10** Central and SecuredCluster (operator on channel `stable`)
+3. **SecuredCluster** installed in `stackrox` — Central alone does not deploy the plugin
+4. `advanced-cluster-security` in `consoles.operator.openshift.io/cluster` `spec.plugins`
+5. OpenShift Console rollout complete (hard-refresh browser: Ctrl+Shift+R)
+
+Diagnose:
+
+```bash
+source ~/.bashrc
+bash basic-setup/diagnose-console-plugin.sh
+```
+
+Quick checks:
+
+```bash
+oc get clusterversion version -o jsonpath='{.status.desired.version}{"\n"}'
+oc get csv -A | grep rhacs
+oc get securedcluster,consoleplugin -n stackrox
+oc get consoles.operator.openshift.io cluster -o jsonpath='{.spec.plugins}{"\n"}'
+oc get deployment console -n openshift-console
+```
+
 ## What This Does NOT Cover
 
 - RHACS Operator / Central installation

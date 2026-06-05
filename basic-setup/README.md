@@ -122,6 +122,20 @@ RHACS 4.10 ships a dynamic OpenShift Console plugin (`advanced-cluster-security`
 
 Disable with `RHACS_ENSURE_CONSOLE_PLUGIN=0` if you do not want console integration.
 
+**Common failure causes**
+
+| Symptom | Likely cause |
+|---------|----------------|
+| No `Security` menu in OpenShift console | OCP below 4.19, RHACS below 4.10, or plugin not in `spec.plugins` |
+| `ConsolePlugin` CR missing | No SecuredCluster on this cluster (Central-only install) |
+| Plugin enabled but UI empty | Console rollout pending — wait for `deployment/console` in `openshift-console` |
+
+Run diagnostics without changing the cluster:
+
+```bash
+bash basic-setup/diagnose-console-plugin.sh
+```
+
 ## What Gets Configured
 
 ### Collector Networks (Script 02)

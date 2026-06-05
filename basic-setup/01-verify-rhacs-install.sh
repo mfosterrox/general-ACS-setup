@@ -42,9 +42,12 @@ export RHACS_DEFAULT_VERSION="${RHACS_DEFAULT_VERSION:-4.10}"
 export RHACS_VERSION="${RHACS_VERSION:-${RHACS_DEFAULT_VERSION}}"
 export RHACS_OPERATOR_CHANNEL="${RHACS_OPERATOR_CHANNEL:-stable}"
 
-# OpenShift Console security plugin (4.10+; includes vulnerability views for workloads and VMs).
+# OpenShift Console security plugin (4.10+; RHACS docs require OCP 4.19+).
 export RHACS_CONSOLE_PLUGIN_NAME="${RHACS_CONSOLE_PLUGIN_NAME:-advanced-cluster-security}"
 export RHACS_ENSURE_CONSOLE_PLUGIN="${RHACS_ENSURE_CONSOLE_PLUGIN:-1}"
+export RHACS_CONSOLE_PLUGIN_WAIT_SEC="${RHACS_CONSOLE_PLUGIN_WAIT_SEC:-600}"
+export RHACS_CONSOLE_ROLLOUT_WAIT_SEC="${RHACS_CONSOLE_ROLLOUT_WAIT_SEC:-300}"
+export RHACS_CONSOLE_PLUGIN_MIN_OCP="${RHACS_CONSOLE_PLUGIN_MIN_OCP:-4.19}"
 
 # Namespaces to search for the RHACS OLM subscription (comma- or space-separated override)
 RHACS_SUBSCRIPTION_SEARCH_NAMESPACES="${RHACS_SUBSCRIPTION_SEARCH_NAMESPACES:-${RHACS_OPERATOR_NAMESPACE} openshift-operators ${RHACS_NAMESPACE}}"
@@ -711,8 +714,136 @@ find_rhacs_console_plugin_name() {
     return 1
 }
 
+get_openshift_cluster_version() {
+    oc get clusterversion version -o jsonpath='{.status.desired.version}' 2>/dev/null || echo ""
+}
+
+# RHACS 4.10 console plugin docs: OCP 4.19, 4.20, or 4.21 required.
+openshift_version_meets_console_plugin_requirement() {
+    local ocp_ver="${1:-$(get_openshift_cluster_version)}"
+    local min_ocp="${RHACS_CONSOLE_PLUGIN_MIN_OCP:-4.19}"
+    if [ -z "${ocp_ver}" ]; then
+        return 1
+    fi
+    local ocp_mm
+    ocp_mm=$(extract_major_minor "${ocp_ver}")
+    [ "$(printf '%s\n' "${min_ocp}" "${ocp_mm}" | sort -V | tail -1)" = "${ocp_mm}" ]
+}
+
+secured_cluster_present_for_console_plugin() {
+    oc get securedcluster -n "${RHACS_NAMESPACE}" -o name 2>/dev/null | grep -q .
+}
+
+wait_for_console_operator_rollout() {
+    local max_wait="${RHACS_CONSOLE_ROLLOUT_WAIT_SEC:-300}"
+    local elapsed=0
+    local step=10
+
+    print_info "Waiting for OpenShift Console rollout after plugin enable (up to ${max_wait}s)..."
+    if oc rollout status deployment/console -n openshift-console --timeout="${max_wait}s" 2>/dev/null; then
+        print_info "✓ OpenShift Console deployment rolled out"
+        return 0
+    fi
+
+    while [ "${elapsed}" -lt "${max_wait}" ]; do
+        local available updated
+        available=$(oc get deployment console -n openshift-console -o jsonpath='{.status.availableReplicas}' 2>/dev/null || echo "0")
+        updated=$(oc get deployment console -n openshift-console -o jsonpath='{.status.updatedReplicas}' 2>/dev/null || echo "0")
+        local desired
+        desired=$(oc get deployment console -n openshift-console -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "1")
+        if [ "${available:-0}" -ge "${desired:-1}" ] && [ "${updated:-0}" -ge "${desired:-1}" ]; then
+            print_info "✓ OpenShift Console deployment is available (${available}/${desired})"
+            return 0
+        fi
+        sleep "${step}"
+        elapsed=$((elapsed + step))
+    done
+    print_warn "OpenShift Console rollout not confirmed within ${max_wait}s — hard-refresh the browser after pods stabilize"
+    return 1
+}
+
+verify_console_plugin_backend() {
+    local plugin_name="$1"
+    local svc_ns svc_name
+
+    if [ -z "${plugin_name}" ]; then
+        return 1
+    fi
+
+    svc_ns=$(oc get consoleplugin "${plugin_name}" -o jsonpath='{.spec.backend.service.name}{"\n"}{.spec.backend.service.namespace}' 2>/dev/null | tail -1)
+    svc_name=$(oc get consoleplugin "${plugin_name}" -o jsonpath='{.spec.backend.service.name}' 2>/dev/null || echo "")
+    if [ -z "${svc_ns}" ] || [ -z "${svc_name}" ]; then
+        print_warn "ConsolePlugin '${plugin_name}' has no backend service reference yet"
+        return 1
+    fi
+
+    if oc get svc "${svc_name}" -n "${svc_ns}" &>/dev/null; then
+        print_info "✓ Plugin backend service ${svc_ns}/${svc_name} exists"
+    else
+        print_warn "Plugin backend service ${svc_ns}/${svc_name} not found"
+        return 1
+    fi
+
+    if oc get endpoints "${svc_name}" -n "${svc_ns}" -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null | grep -q .; then
+        print_info "✓ Plugin backend service has endpoints"
+        return 0
+    fi
+
+    print_warn "Plugin backend service ${svc_ns}/${svc_name} has no endpoints — SecuredCluster operator may still be reconciling"
+    return 1
+}
+
+diagnose_rhacs_console_plugin() {
+    local plugin_name="${RHACS_CONSOLE_PLUGIN_NAME:-advanced-cluster-security}"
+    local ocp_ver installed_ver installed_mm target_mm
+
+    print_step "Console plugin diagnostics"
+    ocp_ver=$(get_openshift_cluster_version)
+    installed_ver=$(get_installed_version 2>/dev/null || echo "unknown")
+    installed_mm=$(extract_major_minor "${installed_ver}")
+    target_mm=$(extract_major_minor "${RHACS_VERSION:-${RHACS_DEFAULT_VERSION}}")
+
+    print_info "OpenShift version: ${ocp_ver:-unknown} (RHACS 4.10 plugin requires OCP ${RHACS_CONSOLE_PLUGIN_MIN_OCP}+)"
+    print_info "RHACS installed: ${installed_ver} (target ${target_mm} on channel ${RHACS_OPERATOR_CHANNEL:-stable})"
+
+    if ! openshift_version_meets_console_plugin_requirement "${ocp_ver}"; then
+        print_error "OpenShift ${ocp_ver:-unknown} is below ${RHACS_CONSOLE_PLUGIN_MIN_OCP} — RHACS console security integration is not supported on this cluster version"
+    fi
+
+    if [ -n "${installed_mm}" ] && version_gt "${target_mm}" "${installed_mm}"; then
+        print_error "RHACS ${installed_mm} is below ${target_mm} — upgrade on channel ${RHACS_OPERATOR_CHANNEL:-stable} before the console plugin can work"
+    fi
+
+    if secured_cluster_present_for_console_plugin; then
+        print_info "✓ SecuredCluster CR present in ${RHACS_NAMESPACE} (required to deploy the plugin)"
+    else
+        print_error "No SecuredCluster in ${RHACS_NAMESPACE} — the RHACS operator deploys the ConsolePlugin with SecuredCluster, not Central alone"
+        print_info "Install SecuredCluster on this OpenShift cluster, then rerun this script"
+    fi
+
+    if oc get consoleplugin "${plugin_name}" &>/dev/null; then
+        print_info "✓ ConsolePlugin CR '${plugin_name}' exists"
+        verify_console_plugin_backend "${plugin_name}" || true
+    else
+        print_error "ConsolePlugin CR '${plugin_name}' not found"
+        print_info "List plugins: oc get consoleplugins"
+    fi
+
+    local enabled_plugins
+    enabled_plugins=$(oc get consoles.operator.openshift.io cluster -o jsonpath='{.spec.plugins[*]}' 2>/dev/null || echo "")
+    if echo "${enabled_plugins}" | tr ' ' '\n' | grep -qx "${plugin_name}"; then
+        print_info "✓ '${plugin_name}' is listed in consoles.operator.openshift.io/cluster spec.plugins"
+    else
+        print_error "'${plugin_name}' is NOT enabled in consoles.operator.openshift.io/cluster spec.plugins"
+        print_info "Enable: oc patch consoles.operator.openshift.io cluster --type=json -p='[{\"op\":\"add\",\"path\":\"/spec/plugins/-\",\"value\":\"${plugin_name}\"}]'"
+    fi
+
+    oc get deployment console -n openshift-console -o jsonpath='Console pods ready: {.status.readyReplicas}/{.spec.replicas}{"\n"}' 2>/dev/null || true
+    print_info "After fixes: hard-refresh the OpenShift console (Ctrl+Shift+R) and look for Security > Vulnerabilities in the navigation"
+}
+
 wait_for_rhacs_console_plugin() {
-    local max_wait="${RHACS_CONSOLE_PLUGIN_WAIT_SEC:-180}"
+    local max_wait="${RHACS_CONSOLE_PLUGIN_WAIT_SEC:-600}"
     local elapsed=0
     local plugin_name=""
 
@@ -749,16 +880,19 @@ enable_plugin_in_console_operator() {
         return 0
     fi
 
-    if echo "${console_json}" | jq -e '.spec.plugins | type == "array"' &>/dev/null; then
-        if oc patch consoles.operator.openshift.io cluster --type=json \
-            -p="[{\"op\":\"add\",\"path\":\"/spec/plugins/-\",\"value\":\"${plugin_name}\"}]" 2>/dev/null; then
-            print_info "✓ RHACS Console plugin '${plugin_name}' enabled in OpenShift Console"
-            return 0
-        fi
+    # Remove empty plugin entries (some clusters have spec.plugins: [""]).
+    patched=$(echo "${console_json}" | jq --arg p "${plugin_name}" '
+        .spec.plugins = ((.spec.plugins // []) | map(select(length > 0)) + [$p] | unique)
+    ' -c)
+
+    if oc patch consoles.operator.openshift.io cluster --type=merge \
+        -p "{\"spec\":{\"plugins\":$(echo "${patched}" | jq -c '.spec.plugins')}}" 2>/dev/null; then
+        print_info "✓ RHACS Console plugin '${plugin_name}' enabled in OpenShift Console"
+        return 0
     fi
 
-    patched=$(echo "${console_json}" | jq --arg p "${plugin_name}" '.spec.plugins = ((.spec.plugins // []) + [$p] | unique)' -c)
-    if oc patch consoles.operator.openshift.io cluster --type=merge -p "{\"spec\":{\"plugins\":$(echo "${patched}" | jq -c '.spec.plugins')}}" 2>/dev/null; then
+    if oc patch consoles.operator.openshift.io cluster --type=json \
+        -p="[{\"op\":\"add\",\"path\":\"/spec/plugins/-\",\"value\":\"${plugin_name}\"}]" 2>/dev/null; then
         print_info "✓ RHACS Console plugin '${plugin_name}' enabled in OpenShift Console"
         return 0
     fi
@@ -767,39 +901,28 @@ enable_plugin_in_console_operator() {
     return 1
 }
 
-enable_plugins_in_console_operator() {
-    local plugin enabled=0 failed=0
-    for plugin in "$@"; do
-        [ -n "${plugin}" ] || continue
-        if enable_plugin_in_console_operator "${plugin}"; then
-            enabled=$((enabled + 1))
-        else
-            failed=$((failed + 1))
-        fi
-    done
-    [ "${failed}" -eq 0 ] && [ "${enabled}" -gt 0 ]
-}
+resolve_rhacs_console_plugin_name() {
+    local plugin_name
 
-collect_rhacs_console_plugin_names() {
-    local -a plugins=()
-    local plugin discovered
-
-    if [ -n "${RHACS_CONSOLE_PLUGIN_NAME:-}" ]; then
-        plugins+=("${RHACS_CONSOLE_PLUGIN_NAME}")
+    plugin_name=$(find_rhacs_console_plugin_name 2>/dev/null || true)
+    if [ -n "${plugin_name}" ] && oc get consoleplugin "${plugin_name}" &>/dev/null; then
+        echo "${plugin_name}"
+        return 0
     fi
 
-    while IFS= read -r plugin; do
-        [ -n "${plugin}" ] && plugins+=("${plugin}")
-    done < <(get_rhacs_console_plugins_from_csv 2>/dev/null || true)
+    plugin_name=$(wait_for_rhacs_console_plugin 2>/dev/null || true)
+    if [ -n "${plugin_name}" ] && oc get consoleplugin "${plugin_name}" &>/dev/null; then
+        echo "${plugin_name}"
+        return 0
+    fi
 
-    plugin=$(find_rhacs_console_plugin_name 2>/dev/null || true)
-    [ -n "${plugin}" ] && plugins+=("${plugin}")
+    plugin_name=$(get_rhacs_console_plugin_from_csv 2>/dev/null || true)
+    if [ -n "${plugin_name}" ]; then
+        echo "${plugin_name}"
+        return 0
+    fi
 
-    for plugin in advanced-cluster-security acs rhacs; do
-        plugins+=("${plugin}")
-    done
-
-    printf '%s\n' "${plugins[@]}" | awk 'NF && !seen[$0]++'
+    echo "${RHACS_CONSOLE_PLUGIN_NAME:-advanced-cluster-security}"
 }
 
 wait_for_rhacs_target_version() {
@@ -835,51 +958,52 @@ ensure_rhacs_console_plugin_enabled() {
         return 0
     fi
 
-    local target_mm plugin_name installed_mm plugin_names=() discovered_plugins=()
+    local target_mm plugin_name installed_mm ocp_ver
     target_mm=$(extract_major_minor "${RHACS_VERSION:-${RHACS_DEFAULT_VERSION}}")
-    wait_for_rhacs_target_version "${target_mm}" || true
+    ocp_ver=$(get_openshift_cluster_version)
 
-    mapfile -t plugin_names < <(collect_rhacs_console_plugin_names)
-
-    plugin_name=$(find_rhacs_console_plugin_name 2>/dev/null || true)
-    if [ -z "${plugin_name}" ] || ! oc get consoleplugin "${plugin_name}" &>/dev/null; then
-        plugin_name=$(wait_for_rhacs_console_plugin 2>/dev/null || true)
-    fi
-
-    if [ -n "${plugin_name}" ] && oc get consoleplugin "${plugin_name}" &>/dev/null; then
-        print_info "Found ConsolePlugin CR: ${plugin_name}"
-        discovered_plugins=("${plugin_name}")
-    else
-        installed_mm=$(extract_major_minor "$(get_installed_version 2>/dev/null || echo "")")
-        print_warn "ConsolePlugin CR not found yet (expected: ${RHACS_CONSOLE_PLUGIN_NAME})"
-        if [ -n "${installed_mm}" ] && version_gt "${target_mm}" "${installed_mm}"; then
-            print_warn "Console security plugin requires RHACS ${target_mm}+ (installed: ${installed_mm})"
-            print_warn "Complete the operator upgrade on channel ${RHACS_OPERATOR_CHANNEL:-stable}, then rerun this script"
-        else
-            print_warn "Plugin CR is created by the RHACS Operator after upgrade; enabling by name in consoles.operator.openshift.io"
-        fi
-        discovered_plugins=("${RHACS_CONSOLE_PLUGIN_NAME}")
-    fi
-
-    local -a to_enable=()
-    local candidate
-    for candidate in "${discovered_plugins[@]}" "${plugin_names[@]}"; do
-        [ -n "${candidate}" ] && to_enable+=("${candidate}")
-    done
-
-    if [ "${#to_enable[@]}" -eq 0 ]; then
-        to_enable=("${RHACS_CONSOLE_PLUGIN_NAME}")
-    fi
-
-    mapfile -t to_enable < <(printf '%s\n' "${to_enable[@]}" | awk 'NF && !seen[$0]++')
-
-    if enable_plugins_in_console_operator "${to_enable[@]}"; then
-        print_info "✓ RHACS Console security plugin enablement complete"
+    if ! openshift_version_meets_console_plugin_requirement "${ocp_ver}"; then
+        print_error "OpenShift ${ocp_ver:-unknown} does not meet RHACS console plugin requirement (OCP ${RHACS_CONSOLE_PLUGIN_MIN_OCP}+)"
+        print_warn "Upgrade OpenShift or use RHACS Central UI for vulnerability views until the cluster is on a supported OCP version"
+        diagnose_rhacs_console_plugin
         return 0
     fi
 
-    print_info "After upgrade to ${target_mm} and ConsolePlugin CR creation, rerun: bash basic-setup/01-verify-rhacs-install.sh"
-    return 0
+    wait_for_rhacs_target_version "${target_mm}" || true
+    installed_mm=$(extract_major_minor "$(get_installed_version 2>/dev/null || echo "")")
+
+    if [ -n "${installed_mm}" ] && version_gt "${target_mm}" "${installed_mm}"; then
+        print_warn "RHACS ${installed_mm} is below ${target_mm}; console plugin requires the ${target_mm} operator/Central/SecuredCluster stack"
+    fi
+
+    if ! secured_cluster_present_for_console_plugin; then
+        print_error "No SecuredCluster in ${RHACS_NAMESPACE} — RHACS deploys the ConsolePlugin when SecuredCluster is installed on this cluster"
+        print_info "Central-only installs do not surface Security > Vulnerabilities in the OpenShift console on this cluster"
+        diagnose_rhacs_console_plugin
+        return 0
+    fi
+
+    plugin_name=$(resolve_rhacs_console_plugin_name)
+    print_info "Using console plugin name: ${plugin_name}"
+
+    if ! oc get consoleplugin "${plugin_name}" &>/dev/null; then
+        print_warn "ConsolePlugin CR '${plugin_name}' not found after ${RHACS_CONSOLE_PLUGIN_WAIT_SEC:-600}s"
+        print_warn "Confirm RHACS operator CSV is 4.10+ and SecuredCluster is reconciled: oc get securedcluster,csv -n ${RHACS_NAMESPACE}"
+    else
+        print_info "Found ConsolePlugin CR: ${plugin_name}"
+        verify_console_plugin_backend "${plugin_name}" || true
+    fi
+
+    if ! enable_plugin_in_console_operator "${plugin_name}"; then
+        diagnose_rhacs_console_plugin
+        return 0
+    fi
+
+    wait_for_console_operator_rollout || true
+    verify_console_plugin_backend "${plugin_name}" || true
+
+    print_info ""
+    diagnose_rhacs_console_plugin
 }
 
 # Main function
@@ -918,5 +1042,7 @@ main() {
     print_info "================================="
 }
 
-# Run main function
-main "$@"
+# Run main only when executed directly (not when sourced by diagnose-console-plugin.sh).
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi
