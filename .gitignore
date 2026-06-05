@@ -47,3 +47,9 @@ node_modules
 
 # RHACS init bundles (contain sensitive TLS certificates)
 setup-files/init-bundles/
+
+# Monitoring setup generated certificates (local only)
+monitoring-setup/.env.certs
+monitoring-setup/*.crt
+monitoring-setup/*.key
+.setup-logs/

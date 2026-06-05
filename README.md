@@ -62,6 +62,7 @@ git pull origin main
 | `RHACS_FORCE_DOWNGRADE` | No | `false` | Allow downgrade when `RHACS_VERSION` is older |
 | `SKIP_COLLECTOR_NETWORK_CONFIG` | No | `0` | Set to `1` to skip script 02 |
 | `SKIP_BASIC_SETUP` | No | `0` | Set to `1` to skip basic-setup in root `install.sh` |
+| `SKIP_MONITORING_SETUP` | No | `0` | Set to `1` to skip monitoring-setup in root `install.sh` |
 | `ALLOW_PASSWORD_TOKEN_GEN` | No | `0` | Deprecated: generate token from `ROX_PASSWORD` if token missing |
 
 ## Setup Scripts
@@ -79,14 +80,25 @@ Executed in order by `basic-setup/install.sh`:
 
 Script `04-deploy-applications.sh` is intentionally excluded — demo workloads belong in environment-specific repos like [rhacs-demo](https://github.com/mfosterrox/rhacs-demo).
 
+After `basic-setup`, root `install.sh` runs **monitoring-setup** (Cluster Observability Operator, Prometheus scrape of Central `/metrics`, Perses dashboards, certificate auth). See [monitoring-setup/README.md](monitoring-setup/README.md).
+
+| Script | Description | Requires Token |
+|--------|-------------|----------------|
+| `monitoring-setup/install.sh` | COO stack, Perses dashboards, Monitoring auth provider | **Yes** |
+| `monitoring-setup/01-setup-certificates.sh` | CA + client certs for Prometheus scrape auth | No |
+| `monitoring-setup/02-install-monitoring.sh` | MonitoringStack, ScrapeConfig, Perses | No |
+| `monitoring-setup/03-configure-rhacs-auth.sh` | Declarative role + User-Certificate auth provider | **Yes** |
+
+Monitoring manifests default to namespace `stackrox` (standard RHACS install). Set `RHACS_NAMESPACE` if your Central runs elsewhere.
+
 ## Relationship to rhacs-demo
 
 | Repo | Purpose |
 |------|---------|
-| **general-ACS-setup** (this repo) | Shared ACS Central post-install configuration for all environments |
-| **rhacs-demo** | Full presenter workshop with demo apps, FAM, monitoring, MCP, Splunk, and lab content |
+| **general-ACS-setup** (this repo) | Shared ACS Central post-install + Prometheus monitoring for all environments |
+| **rhacs-demo** | Full presenter workshop with demo apps, FAM, MCP, Splunk, and lab content |
 
-Use this repo when you need consistent Central configuration without demo-specific add-ons.
+Use this repo when you need consistent Central configuration and monitoring without demo-specific add-ons.
 
 ## Troubleshooting
 
@@ -111,6 +123,7 @@ oc get route central -n stackrox -o jsonpath='https://{.spec.host}{"\n"}'
 ```bash
 source ~/.bashrc
 bash basic-setup/05-configure-rhacs-settings.sh
+bash monitoring-setup/install.sh
 ```
 
 ### Rerun full setup
@@ -124,5 +137,5 @@ source ~/.bashrc
 
 - RHACS Operator / Central installation
 - SecuredCluster init bundle generation
-- Demo workloads and integrations (Splunk, MCP, FAM, Tekton, GitOps policies)
+- Demo workloads and integrations (Splunk, MCP, FAM, Tekton, GitOps policies) — see [rhacs-demo](https://github.com/mfosterrox/rhacs-demo)
 - Non-OpenShift Kubernetes clusters

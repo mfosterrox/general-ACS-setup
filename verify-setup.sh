@@ -11,6 +11,8 @@
 # Skip section:
 #   VERIFY_SKIP_BASIC=1 ./verify-setup.sh
 #   SKIP_BASIC_SETUP=1 ./verify-setup.sh
+#   VERIFY_SKIP_MONITORING=1 ./verify-setup.sh
+#   SKIP_MONITORING_SETUP=1 ./verify-setup.sh
 #
 # Exit: 0 = no failures (warnings allowed); 1 = one or more checks failed.
 # --- end help ---
@@ -42,6 +44,7 @@ RHACS_NAMESPACE="${RHACS_NAMESPACE:-stackrox}"
 FAILURES=0
 WARNINGS=0
 FAIL_BASIC=0
+FAIL_MONITORING=0
 
 usage() {
     sed -n '2,/^# --- end help ---$/p' "$0" | sed 's/^# \{0,1\}//' | sed '/^--- end help ---$/d'
@@ -207,6 +210,72 @@ verify_basic() {
     return "${failed}"
 }
 
+verify_monitoring() {
+    print_step "monitoring-setup"
+    local failed=0
+    local ms_name="sample-stackrox-monitoring-stack"
+    local scrape_name="sample-stackrox-scrape-config"
+    local prom_sts default_sts
+    default_sts="${ms_name}-prometheus"
+    prom_sts=$(oc get sts -n "${RHACS_NAMESPACE}" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null | grep -F "${ms_name}" | grep -i prometheus | head -1)
+    if [ -z "${prom_sts}" ]; then
+        prom_sts=$(oc get sts -n "${RHACS_NAMESPACE}" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null | grep -i prometheus | head -1)
+    fi
+    if [ -z "${prom_sts}" ]; then
+        prom_sts="${default_sts}"
+    fi
+
+    if oc get monitoringstack "${ms_name}" -n "${RHACS_NAMESPACE}" &>/dev/null; then
+        print_ok "MonitoringStack ${ms_name} exists in ${RHACS_NAMESPACE}"
+    else
+        print_fail "MonitoringStack not found (expected name ${ms_name})"
+        failed=1
+    fi
+
+    if oc get scrapeconfig "${scrape_name}" -n "${RHACS_NAMESPACE}" &>/dev/null; then
+        print_ok "ScrapeConfig ${scrape_name} exists in ${RHACS_NAMESPACE}"
+    else
+        print_fail "ScrapeConfig not found (expected name ${scrape_name})"
+        failed=1
+    fi
+
+    if oc get "statefulset/${prom_sts}" -n "${RHACS_NAMESPACE}" &>/dev/null; then
+        local ready desired
+        ready=$(oc get "statefulset/${prom_sts}" -n "${RHACS_NAMESPACE}" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
+        desired=$(oc get "statefulset/${prom_sts}" -n "${RHACS_NAMESPACE}" -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "1")
+        if [ "${desired:-0}" -ge 1 ] 2>/dev/null && [ "${ready:-0}" -ge "${desired}" ] 2>/dev/null; then
+            print_ok "Prometheus StatefulSet ${prom_sts} ready (readyReplicas=${ready}, desired=${desired})"
+        else
+            print_warn "Prometheus StatefulSet ${prom_sts} not fully ready (readyReplicas=${ready:-?}, desired=${desired:-?})"
+            WARNINGS=$((WARNINGS + 1))
+        fi
+    elif oc get pods -n "${RHACS_NAMESPACE}" -l app.kubernetes.io/name=prometheus -o name 2>/dev/null | grep -q .; then
+        print_ok "Prometheus pod(s) present (label app.kubernetes.io/name=prometheus)"
+    else
+        print_warn "No Prometheus workload found — COO may still be reconciling"
+        WARNINGS=$((WARNINGS + 1))
+    fi
+
+    if [ -n "${ROX_API_TOKEN:-}" ]; then
+        local base providers
+        base=$(get_central_url)
+        if [ -n "${base}" ]; then
+            providers=$(curl -k -s -H "Authorization: Bearer ${ROX_API_TOKEN}" "${base}/v1/authProviders" 2>/dev/null || echo "")
+            if echo "${providers}" | jq -e '.authProviders[] | select(.name=="Monitoring")' &>/dev/null; then
+                print_ok "RHACS auth provider 'Monitoring' exists"
+            else
+                print_warn "Auth provider 'Monitoring' not found (monitoring-setup/03 may not have completed)"
+                WARNINGS=$((WARNINGS + 1))
+            fi
+        fi
+    else
+        print_warn "ROX_API_TOKEN unset — skipping Monitoring auth provider API check"
+        WARNINGS=$((WARNINGS + 1))
+    fi
+
+    return "${failed}"
+}
+
 main() {
     if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
         usage
@@ -241,6 +310,16 @@ main() {
         verify_basic || {
             FAILURES=$((FAILURES + 1))
             FAIL_BASIC=1
+        }
+    fi
+
+    echo ""
+    if skip_section "VERIFY_SKIP_MONITORING" "SKIP_MONITORING_SETUP"; then
+        :
+    else
+        verify_monitoring || {
+            FAILURES=$((FAILURES + 1))
+            FAIL_MONITORING=1
         }
     fi
 

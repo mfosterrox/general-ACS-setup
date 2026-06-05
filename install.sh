@@ -15,6 +15,7 @@
 #
 # Optional skip flags (export before running):
 #   SKIP_BASIC_SETUP=1 — do not run basic-setup/install.sh
+#   SKIP_MONITORING_SETUP=1 — do not run monitoring-setup/install.sh
 #
 # After install: ./verify-setup.sh
 # --- end help ---
@@ -166,6 +167,27 @@ main() {
         print_info "✓ basic-setup completed (log: ${basic_log})"
     else
         print_info "Skipping basic-setup (SKIP_BASIC_SETUP=1)"
+    fi
+
+    if [ "${SKIP_MONITORING_SETUP:-0}" != "1" ]; then
+        print_step "Running monitoring-setup"
+        local monitoring_log="${LOG_DIR}/monitoring-setup.log"
+        print_info "Streaming output here and to ${monitoring_log}"
+        set +e
+        (
+            cd "${REPO_ROOT}"
+            exec bash "${REPO_ROOT}/monitoring-setup/install.sh"
+        ) 2>&1 | tee "${monitoring_log}"
+        local monitoring_ec="${PIPESTATUS[0]}"
+        set -e
+        if [ "${monitoring_ec}" -ne 0 ]; then
+            print_error "✗ monitoring-setup failed (exit ${monitoring_ec}); see ${monitoring_log}"
+            print_info "To rerun: cd \"${REPO_ROOT}\" && bash monitoring-setup/install.sh"
+            exit 1
+        fi
+        print_info "✓ monitoring-setup completed (log: ${monitoring_log})"
+    else
+        print_info "Skipping monitoring-setup (SKIP_MONITORING_SETUP=1)"
     fi
 
     echo ""
