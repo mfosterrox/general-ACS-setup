@@ -52,7 +52,7 @@ git pull origin main
 | `ROX_CENTRAL_ADDRESS` | **Yes** | auto-detect | Full HTTPS URL to Central (`oc get route central`) |
 | `RHACS_NAMESPACE` | No | `stackrox` | Namespace where RHACS is installed |
 | `RHACS_ROUTE_NAME` | No | `central` | OpenShift route name for Central |
-| `RHACS_VERSION` | No | — | Target version pin (e.g. `4.10`) |
+| `RHACS_VERSION` | No | — | Target version pin (e.g. `4.10`); unset = keep installed version |
 | `RHACS_FORCE_DOWNGRADE` | No | `false` | Allow downgrade when `RHACS_VERSION` is older |
 | `SKIP_COLLECTOR_NETWORK_CONFIG` | No | `0` | Set to `1` to skip script 02 |
 | `SKIP_BASIC_SETUP` | No | `0` | Set to `1` to skip basic-setup in root `install.sh` |
