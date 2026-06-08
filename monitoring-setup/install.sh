@@ -85,6 +85,12 @@ echo ""
 # Load ROX_* from ~/.bashrc if not already set (non-interactive shells do not source ~/.bashrc)
 load_rox_from_bashrc
 
+# Strip trailing slash to avoid //v1/... URLs and OpenShift route 301 redirects
+if [ -n "${ROX_CENTRAL_ADDRESS:-}" ]; then
+  ROX_CENTRAL_ADDRESS="${ROX_CENTRAL_ADDRESS%/}"
+  export ROX_CENTRAL_ADDRESS
+fi
+
 # Check required environment variables
 MISSING_VARS=0
 

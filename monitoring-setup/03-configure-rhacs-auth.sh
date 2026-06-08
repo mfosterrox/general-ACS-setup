@@ -65,6 +65,29 @@ strip_curl_http_line() {
   sed '$d'
 }
 
+# Normalize Central URL (no trailing slash — avoids //v1/... and route 301 redirects).
+normalize_rox_central_address() {
+  local url="${ROX_CENTRAL_ADDRESS:-}"
+  url="${url%/}"
+  ROX_CENTRAL_ADDRESS="${url}"
+  export ROX_CENTRAL_ADDRESS
+}
+
+# Portable template render (gettext envsubst is not in OpenShift web terminal images).
+render_json_template() {
+  local tpl="$1"
+  local content
+  if [ ! -f "$tpl" ]; then
+    error "Template not found: $tpl"
+    return 1
+  fi
+  content=$(<"$tpl")
+  content="${content//\$\{ROX_CENTRAL_ADDRESS\}/${ROX_CENTRAL_ADDRESS}}"
+  content="${content//\$\{TLS_CERT\}/${TLS_CERT}}"
+  content="${content//\$\{AUTH_PROVIDER_ID\}/${AUTH_PROVIDER_ID:-}}"
+  printf '%s' "$content"
+}
+
 # Get the script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -96,6 +119,9 @@ if [ -z "${ROX_API_TOKEN:-}" ]; then
   error "ROX_API_TOKEN is not set"
   exit 1
 fi
+
+normalize_rox_central_address
+log "RHACS Central API: ${ROX_CENTRAL_ADDRESS}"
 
 # Load TLS_CERT from certificate generation script
 if [ -f "$SCRIPT_DIR/.env.certs" ]; then
@@ -201,7 +227,7 @@ for auth_attempt in $(seq 1 $max_auth_retries); do
   AUTH_PROVIDER_RESPONSE=$(curl -k -s -w "\n%{http_code}" -X POST "$ROX_CENTRAL_ADDRESS/v1/authProviders" \
     -H "Authorization: Bearer $ROX_API_TOKEN" \
     -H "Content-Type: application/json" \
-    --data-raw "$(envsubst < monitoring-examples/rhacs/auth-provider.json.tpl)")
+    --data-raw "$(render_json_template monitoring-examples/rhacs/auth-provider.json.tpl)")
 
   HTTP_CODE=$(echo "$AUTH_PROVIDER_RESPONSE" | tail -1)
   AUTH_RESPONSE_BODY=$(echo "$AUTH_PROVIDER_RESPONSE" | strip_curl_http_line)
@@ -239,7 +265,7 @@ if [ -n "$AUTH_PROVIDER_ID" ]; then
   
   # Create group mapping with Prometheus Server role (retry if role not yet available)
   log "Creating 'Prometheus Server' role group mapping..."
-  GROUP_PAYLOAD=$(envsubst < monitoring-examples/rhacs/admin-group.json.tpl)
+  GROUP_PAYLOAD=$(render_json_template monitoring-examples/rhacs/admin-group.json.tpl)
   log "Group payload: $GROUP_PAYLOAD"
   
   max_retries=15
