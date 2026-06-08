@@ -1,0 +1,77 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: parasol-insurance
+  labels:
+    app: parasol-insurance
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: parasol-insurance
+  namespace: parasol-insurance
+  labels:
+    app: parasol-insurance
+spec:
+  selector:
+    app: parasol-insurance
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: http
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: parasol-insurance
+  namespace: parasol-insurance
+  labels:
+    app: parasol-insurance
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: parasol-insurance
+  template:
+    metadata:
+      labels:
+        app: parasol-insurance
+    spec:
+      containers:
+        - name: parasol-insurance
+          image: quay.io/jfalkner1/parasol-insurance:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 9090
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: parasol-insurance
+  namespace: parasol-insurance
+  labels:
+    app: parasol-insurance
+spec:
+  to:
+    kind: Service
+    name: parasol-insurance
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

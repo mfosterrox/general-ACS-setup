@@ -16,6 +16,8 @@
 # Optional skip flags (export before running):
 #   SKIP_BASIC_SETUP=1 — do not run basic-setup/install.sh
 #   SKIP_MONITORING_SETUP=1 — do not run monitoring-setup/install.sh
+#   SKIP_DEMO_APPS=1 — do not run demo-apps/install.sh
+#   SKIP_PARASOL_INSURANCE=1 — skip only the Parasol Insurance workload
 #
 # After install: ./verify-setup.sh
 # --- end help ---
@@ -188,6 +190,27 @@ main() {
         print_info "✓ monitoring-setup completed (log: ${monitoring_log})"
     else
         print_info "Skipping monitoring-setup (SKIP_MONITORING_SETUP=1)"
+    fi
+
+    if [ "${SKIP_DEMO_APPS:-0}" != "1" ]; then
+        print_step "Running demo-apps"
+        local demo_log="${LOG_DIR}/demo-apps.log"
+        print_info "Streaming output here and to ${demo_log}"
+        set +e
+        (
+            cd "${REPO_ROOT}"
+            exec bash "${REPO_ROOT}/demo-apps/install.sh"
+        ) 2>&1 | tee "${demo_log}"
+        local demo_ec="${PIPESTATUS[0]}"
+        set -e
+        if [ "${demo_ec}" -ne 0 ]; then
+            print_error "✗ demo-apps failed (exit ${demo_ec}); see ${demo_log}"
+            print_info "To rerun: cd \"${REPO_ROOT}\" && bash demo-apps/install.sh"
+            exit 1
+        fi
+        print_info "✓ demo-apps completed (log: ${demo_log})"
+    else
+        print_info "Skipping demo-apps (SKIP_DEMO_APPS=1)"
     fi
 
     echo ""

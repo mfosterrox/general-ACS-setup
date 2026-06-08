@@ -13,6 +13,7 @@
 #   SKIP_BASIC_SETUP=1 ./verify-setup.sh
 #   VERIFY_SKIP_MONITORING=1 ./verify-setup.sh
 #   SKIP_MONITORING_SETUP=1 ./verify-setup.sh
+#   VERIFY_SKIP_DEMO_APPS=1 ./verify-setup.sh
 #
 # Exit: 0 = no failures (warnings allowed); 1 = one or more checks failed.
 # --- end help ---
@@ -45,6 +46,7 @@ FAILURES=0
 WARNINGS=0
 FAIL_BASIC=0
 FAIL_MONITORING=0
+FAIL_DEMO=0
 
 usage() {
     sed -n '2,/^# --- end help ---$/p' "$0" | sed 's/^# \{0,1\}//' | sed '/^--- end help ---$/d'
@@ -307,6 +309,39 @@ verify_monitoring() {
     return "${failed}"
 }
 
+verify_demo_apps() {
+    print_step "demo-apps"
+    local failed=0
+    local ns="${PARASOL_NAMESPACE:-parasol-insurance}"
+
+    if ! oc get deployment parasol-insurance -n "${ns}" &>/dev/null; then
+        print_fail "Deployment parasol-insurance not found in ${ns}"
+        return 1
+    fi
+    print_ok "Deployment parasol-insurance exists in ${ns}"
+
+    local ready desired
+    ready=$(oc get deployment parasol-insurance -n "${ns}" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
+    desired=$(oc get deployment parasol-insurance -n "${ns}" -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "1")
+    if [ "${ready:-0}" -ge 1 ] 2>/dev/null; then
+        print_ok "Parasol Insurance ready (${ready}/${desired})"
+    else
+        print_fail "Parasol Insurance not ready (${ready:-0}/${desired})"
+        failed=1
+    fi
+
+    if oc get route parasol-insurance -n "${ns}" &>/dev/null; then
+        local url
+        url=$(oc get route parasol-insurance -n "${ns}" -o jsonpath='https://{.spec.host}' 2>/dev/null || echo "")
+        print_ok "Route parasol-insurance: ${url:-<no host>}"
+    else
+        print_warn "Route parasol-insurance not found in ${ns}"
+        WARNINGS=$((WARNINGS + 1))
+    fi
+
+    return "${failed}"
+}
+
 main() {
     if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
         usage
@@ -351,6 +386,18 @@ main() {
         verify_monitoring || {
             FAILURES=$((FAILURES + 1))
             FAIL_MONITORING=1
+        }
+    fi
+
+    echo ""
+    if skip_section "VERIFY_SKIP_DEMO_APPS" "SKIP_DEMO_APPS"; then
+        :
+    elif [ "${SKIP_PARASOL_INSURANCE:-0}" = "1" ]; then
+        print_info "Skipping demo-apps (SKIP_PARASOL_INSURANCE=1)"
+    else
+        verify_demo_apps || {
+            FAILURES=$((FAILURES + 1))
+            FAIL_DEMO=1
         }
     fi
 

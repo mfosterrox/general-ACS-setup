@@ -63,6 +63,10 @@ git pull origin main
 | `SKIP_COLLECTOR_NETWORK_CONFIG` | No | `0` | Set to `1` to skip script 02 |
 | `SKIP_BASIC_SETUP` | No | `0` | Set to `1` to skip basic-setup in root `install.sh` |
 | `SKIP_MONITORING_SETUP` | No | `0` | Set to `1` to skip monitoring-setup in root `install.sh` |
+| `SKIP_DEMO_APPS` | No | `0` | Set to `1` to skip demo-apps in root `install.sh` |
+| `SKIP_PARASOL_INSURANCE` | No | `0` | Set to `1` to skip only Parasol Insurance |
+| `PARASOL_IMAGE` | No | `quay.io/jfalkner1/parasol-insurance:latest` | Parasol Insurance container image |
+| `PARASOL_NAMESPACE` | No | `parasol-insurance` | Namespace for Parasol Insurance |
 | `ALLOW_PASSWORD_TOKEN_GEN` | No | `0` | Deprecated: generate token from `ROX_PASSWORD` if token missing |
 
 ## Setup Scripts
@@ -78,7 +82,7 @@ Executed in order by `basic-setup/install.sh`:
 | `06-setup-co-scan-schedule.sh` | Create daily compliance scan schedules | **Yes** |
 | `07-trigger-compliance-scan.sh` | Trigger immediate compliance scans | **Yes** |
 
-Script `04-deploy-applications.sh` is intentionally excluded — demo workloads belong in environment-specific repos like [rhacs-demo](https://github.com/mfosterrox/rhacs-demo).
+Script `04-deploy-applications.sh` from rhacs-demo is not included. Root `install.sh` deploys **Parasol Insurance** via `demo-apps/` ([quay.io/jfalkner1/parasol-insurance:latest](https://quay.io/repository/jfalkner1/parasol-insurance?tab=tags&tag=latest)). Skip with `SKIP_DEMO_APPS=1`.
 
 After `basic-setup`, root `install.sh` runs **monitoring-setup** (Cluster Observability Operator, Prometheus scrape of Central `/metrics`, Perses dashboards, certificate auth). See [monitoring-setup/README.md](monitoring-setup/README.md).
 
@@ -124,6 +128,14 @@ oc get route central -n stackrox -o jsonpath='https://{.spec.host}{"\n"}'
 source ~/.bashrc
 bash basic-setup/05-configure-rhacs-settings.sh
 bash monitoring-setup/install.sh
+bash demo-apps/install.sh
+```
+
+### Parasol Insurance only
+
+```bash
+oc apply -f demo-apps/parasol-insurance/k8s.yaml
+oc get route parasol-insurance -n parasol-insurance -o jsonpath='https://{.spec.host}{"\n"}'
 ```
 
 ### Rerun full setup
