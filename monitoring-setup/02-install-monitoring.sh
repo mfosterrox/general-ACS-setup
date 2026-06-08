@@ -451,5 +451,14 @@ fi
 log "✓ Perses Dashboard confirmed in cluster"
 
 echo ""
+if [ -x "${SCRIPT_DIR}/verify-monitoring-stack.sh" ]; then
+  step "Verifying Prometheus scrape and Perses resources"
+  MONITORING_VERIFY_SKIP_CLIENT_CERT=1 "${SCRIPT_DIR}/verify-monitoring-stack.sh" || {
+    warn "Monitoring verification reported issues — auth/certs are configured in step 03"
+    warn "Rerun after full install: bash ${SCRIPT_DIR}/verify-monitoring-stack.sh"
+  }
+fi
+
+echo ""
 log "✓ Monitoring stack installation complete"
 echo ""

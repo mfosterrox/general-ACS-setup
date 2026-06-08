@@ -98,6 +98,7 @@ After `basic-setup`, root `install.sh` runs **monitoring-setup** (Cluster Observ
 | `monitoring-setup/01-setup-certificates.sh` | CA + client certs for Prometheus scrape auth | No |
 | `monitoring-setup/02-install-monitoring.sh` | MonitoringStack, ScrapeConfig, Perses | No |
 | `monitoring-setup/03-configure-rhacs-auth.sh` | Declarative role + User-Certificate auth provider | **Yes** |
+| `monitoring-setup/verify-monitoring-stack.sh` | End-to-end check: scrape UP, RHACS metrics in Prometheus, Perses CRs | No (runs at end of `install.sh`) |
 
 Monitoring manifests default to namespace `stackrox` (standard RHACS install). Set `RHACS_NAMESPACE` if your Central runs elsewhere.
 

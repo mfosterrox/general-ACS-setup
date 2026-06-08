@@ -370,13 +370,16 @@ oc rollout restart statefulset -n stackrox -l app.kubernetes.io/name=prometheus 
 oc rollout restart deployment -n stackrox -l app.kubernetes.io/name=prometheus 2>/dev/null || true
 ```
 
-Run the debug script to test connectivity at each step (RHACS → Prometheus → Perses):
+Run the verification script to test connectivity at each step (RHACS → Prometheus → Perses):
 
 ```bash
 cd monitoring-setup
-export ROX_CENTRAL_ADDRESS="https://your-central-url"
-./debug-monitoring.sh
+source ~/.bashrc
+export ROX_CENTRAL_ADDRESS="${ROX_CENTRAL_ADDRESS%/}"
+bash verify-monitoring-stack.sh
 ```
+
+This runs automatically at the end of `monitoring-setup/install.sh` and after step 02 (Prometheus/Perses, before auth). It waits up to `MONITORING_DATA_WAIT_SEC` (default 180s) for the scrape target to go UP and RHACS metrics to appear in Prometheus.
 
 Key checks:
 - **Client cert auth**: `curl --cert client.crt --key client.key -k $ROX_CENTRAL_ADDRESS/v1/auth/status`
@@ -491,7 +494,7 @@ monitoring-setup/
 ├── 01-setup-certificates.sh            # Certificate generation
 ├── 02-install-monitoring.sh            # Monitoring stack installation
 ├── 03-configure-rhacs-auth.sh          # RHACS auth configuration
-├── debug-monitoring.sh                 # Debug "No data" on dashboard
+├── verify-monitoring-stack.sh          # End-to-end verify (RHACS → Prometheus → Perses)
 ├── troubleshoot-auth.sh                # Authentication troubleshooting
 ├── reset.sh                            # Cleanup script
 └── monitoring-examples/                # Configuration examples

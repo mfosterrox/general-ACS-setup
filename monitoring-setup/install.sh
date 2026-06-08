@@ -280,10 +280,22 @@ fi
 
 fi
 
+echo ""
+step "Verifying monitoring stack end-to-end"
+if [ ! -x "$SCRIPT_DIR/verify-monitoring-stack.sh" ]; then
+  chmod +x "$SCRIPT_DIR/verify-monitoring-stack.sh" 2>/dev/null || true
+fi
+if "$SCRIPT_DIR/verify-monitoring-stack.sh"; then
+  log "✓ Monitoring stack verification passed"
+else
+  error "Monitoring stack verification failed"
+  print_rerun "$SCRIPT_DIR/verify-monitoring-stack.sh"
+  exit 1
+fi
+
 #================================================================
 # Installation Complete
 #================================================================
-
 
 echo ""
 echo "============================================"
@@ -296,6 +308,9 @@ echo "  - client.crt / client.key  (Client certificate - use for API calls)"
 echo ""
 echo "Test authentication:"
 echo "  cd $SCRIPT_DIR && curl --cert client.crt --key client.key -k \$ROX_CENTRAL_ADDRESS/metrics"
+echo ""
+echo "Re-run monitoring verification:"
+echo "  bash $SCRIPT_DIR/verify-monitoring-stack.sh"
 echo ""
 echo ""
 echo "Note: Auth changes may take 10-30 seconds to propagate."

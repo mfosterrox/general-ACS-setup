@@ -38,6 +38,54 @@ PARASOL_IMAGE="${PARASOL_IMAGE:-quay.io/jfalkner1/parasol-insurance:latest}"
 PARASOL_NAMESPACE="${PARASOL_NAMESPACE:-parasol-insurance}"
 PARASOL_CONTAINER_PORT="${PARASOL_CONTAINER_PORT:-9090}"
 PARASOL_CREATE_ROUTE="${PARASOL_CREATE_ROUTE:-1}"
+PARASOL_ROLLOUT_WAIT_SEC="${PARASOL_ROLLOUT_WAIT_SEC:-600}"
+
+wait_parasol_rollout() {
+    local ns="$1"
+    local max_wait="${PARASOL_ROLLOUT_WAIT_SEC}"
+    local elapsed=0
+    local step=20
+    local ready desired pod_status pod_reason last_reason=""
+
+    log "Waiting for deployment rollout (up to ${max_wait}s)..."
+    while [ "${elapsed}" -lt "${max_wait}" ]; do
+        ready=$(oc get deployment parasol-insurance -n "${ns}" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
+        desired=$(oc get deployment parasol-insurance -n "${ns}" -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "1")
+        if [ "${ready:-0}" -ge 1 ] 2>/dev/null && [ "${ready:-0}" -ge "${desired:-1}" ] 2>/dev/null; then
+            log "✓ Parasol Insurance rollout complete (${ready}/${desired} ready)"
+            return 0
+        fi
+
+        pod_status=$(oc get pods -n "${ns}" -l app=parasol-insurance \
+            -o jsonpath='{.items[0].status.phase}' 2>/dev/null || echo "Pending")
+        pod_reason=$(oc get pods -n "${ns}" -l app=parasol-insurance \
+            -o jsonpath='{.items[0].status.containerStatuses[0].state.waiting.reason}' 2>/dev/null || echo "")
+        if [ -z "${pod_reason}" ]; then
+            pod_reason=$(oc get pods -n "${ns}" -l app=parasol-insurance \
+                -o jsonpath='{.items[0].status.conditions[?(@.type=="PodScheduled")].message}' 2>/dev/null | head -c 80 || echo "")
+        fi
+
+        if [ "${pod_reason}" != "${last_reason}" ] || [ $((elapsed % 60)) -eq 0 ]; then
+            log "  ${ready:-0}/${desired} ready — pod=${pod_status}${pod_reason:+ (${pod_reason})} [${elapsed}s/${max_wait}s]"
+            last_reason="${pod_reason}"
+        fi
+
+        if echo "${pod_reason}" | grep -qiE 'ImagePull|ErrImage|InvalidImageName'; then
+            warn "Image pull problem — check: oc describe pod -n ${ns} -l app=parasol-insurance"
+            warn "Try: export PARASOL_IMAGE=<mirror> or wait for quay.io pull to complete"
+        elif echo "${pod_reason}" | grep -qiE 'CrashLoop|Error'; then
+            warn "Container crashing — check: oc logs -n ${ns} -l app=parasol-insurance --tail=50"
+        fi
+
+        sleep "${step}"
+        elapsed=$((elapsed + step))
+    done
+
+    error "Parasol Insurance deployment did not become ready within ${max_wait}s"
+    oc get pods -n "${ns}" -o wide 2>/dev/null || true
+    oc describe pod -n "${ns}" -l app=parasol-insurance 2>/dev/null | tail -40 || true
+    return 1
+}
 
 deploy_parasol_insurance() {
     local manifest_dir="${SCRIPT_DIR}/parasol-insurance"
@@ -68,10 +116,7 @@ deploy_parasol_insurance() {
         oc delete route parasol-insurance -n "${PARASOL_NAMESPACE}" --ignore-not-found >/dev/null 2>&1 || true
     fi
 
-    log "Waiting for deployment rollout..."
-    if ! oc rollout status deployment/parasol-insurance -n "${PARASOL_NAMESPACE}" --timeout=300s; then
-        error "Parasol Insurance deployment did not become ready"
-        oc get pods -n "${PARASOL_NAMESPACE}" -o wide 2>/dev/null || true
+    if ! wait_parasol_rollout "${PARASOL_NAMESPACE}"; then
         return 1
     fi
 

@@ -306,6 +306,17 @@ verify_monitoring() {
         WARNINGS=$((WARNINGS + 1))
     fi
 
+    local verify_script="${REPO_ROOT}/monitoring-setup/verify-monitoring-stack.sh"
+    if [ -x "${verify_script}" ]; then
+        print_info "Running end-to-end monitoring verification..."
+        if MONITORING_VERIFY_STRICT=0 "${verify_script}"; then
+            print_ok "Monitoring stack pipeline verified (Prometheus scrape + Perses)"
+        else
+            print_fail "Monitoring stack verification failed — see output above"
+            failed=1
+        fi
+    fi
+
     return "${failed}"
 }
 
