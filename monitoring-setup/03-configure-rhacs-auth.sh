@@ -88,9 +88,27 @@ render_json_template() {
   printf '%s' "$content"
 }
 
+# Load ROX_* from ~/.bashrc (non-exported shell vars are not visible to child bash scripts).
+load_rox_from_bashrc() {
+  [ ! -f ~/.bashrc ] && return 0
+  local var line
+  for var in ROX_CENTRAL_ADDRESS ROX_API_TOKEN RHACS_NAMESPACE RHACS_NS; do
+    line=$(grep -E "^(export[[:space:]]+)?${var}=" ~/.bashrc 2>/dev/null | head -1) || true
+    [ -z "$line" ] && continue
+    if grep -qE '\$\(|`' <<< "$line"; then
+      warn "Skipping ${var} from ~/.bashrc (command substitution) — export ${var} in this shell."
+      continue
+    fi
+    [[ "$line" =~ ^export[[:space:]]+ ]] || line="export $line"
+    eval "$line" 2>/dev/null || true
+  done
+}
+
 # Get the script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
+
+load_rox_from_bashrc
 
 RHACS_NAMESPACE="${RHACS_NAMESPACE:-stackrox}"
 
@@ -109,14 +127,16 @@ step "RHACS Authentication Configuration"
 echo "=========================================="
 echo ""
 
-# Check required environment variables
+# Check required environment variables (must be exported or present in ~/.bashrc)
 if [ -z "${ROX_CENTRAL_ADDRESS:-}" ]; then
   error "ROX_CENTRAL_ADDRESS is not set"
+  error "In this shell: export ROX_CENTRAL_ADDRESS='https://central-stackrox.apps...' (or add export to ~/.bashrc and rerun)"
   exit 1
 fi
 
 if [ -z "${ROX_API_TOKEN:-}" ]; then
   error "ROX_API_TOKEN is not set"
+  error "In this shell: export ROX_API_TOKEN='...' (or add export to ~/.bashrc and rerun)"
   exit 1
 fi
 
