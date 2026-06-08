@@ -34,13 +34,16 @@ print_step() {
 # Default values if not set
 RHACS_NAMESPACE="${RHACS_NAMESPACE:-stackrox}"
 RHACS_ROUTE_NAME="${RHACS_ROUTE_NAME:-central}"
-RHACS_OPERATOR_NAMESPACE="${RHACS_OPERATOR_NAMESPACE:-rhacs-operator}"
+RHACS_OPERATOR_NAMESPACE="${RHACS_OPERATOR_NAMESPACE:-openshift-operators}"
 
-# Default target: RHACS 4.10 on the OLM stable channel (Red Hat upgrade docs).
-# Override before running: RHACS_VERSION, RHACS_OPERATOR_CHANNEL, RHACS_SKIP_VERSION_UPDATE=1
+# Default target: RHACS 4.10. Channel auto-resolves (stable, then rhacs-X.Y, then latest).
+# Override: RHACS_VERSION, RHACS_OPERATOR_CHANNEL (with RHACS_AUTO_OPERATOR_CHANNEL=0), RHACS_SKIP_VERSION_UPDATE=1
 export RHACS_DEFAULT_VERSION="${RHACS_DEFAULT_VERSION:-4.10}"
 export RHACS_VERSION="${RHACS_VERSION:-${RHACS_DEFAULT_VERSION}}"
 export RHACS_OPERATOR_CHANNEL="${RHACS_OPERATOR_CHANNEL:-stable}"
+export RHACS_AUTO_OPERATOR_CHANNEL="${RHACS_AUTO_OPERATOR_CHANNEL:-1}"
+RHACS_RESOLVED_OPERATOR_CHANNEL=""
+RHACS_VERSION_UPGRADE_SKIPPED=0
 
 # OpenShift Console security plugin (4.10+; RHACS docs require OCP 4.19+).
 export RHACS_CONSOLE_PLUGIN_NAME="${RHACS_CONSOLE_PLUGIN_NAME:-advanced-cluster-security}"
@@ -49,8 +52,8 @@ export RHACS_CONSOLE_PLUGIN_WAIT_SEC="${RHACS_CONSOLE_PLUGIN_WAIT_SEC:-600}"
 export RHACS_CONSOLE_ROLLOUT_WAIT_SEC="${RHACS_CONSOLE_ROLLOUT_WAIT_SEC:-300}"
 export RHACS_CONSOLE_PLUGIN_MIN_OCP="${RHACS_CONSOLE_PLUGIN_MIN_OCP:-4.19}"
 
-# Namespaces to search for the RHACS OLM subscription (comma- or space-separated override)
-RHACS_SUBSCRIPTION_SEARCH_NAMESPACES="${RHACS_SUBSCRIPTION_SEARCH_NAMESPACES:-${RHACS_OPERATOR_NAMESPACE} openshift-operators ${RHACS_NAMESPACE}}"
+# Namespaces to search for the RHACS OLM subscription (AllNamespaces installs use openshift-operators)
+RHACS_SUBSCRIPTION_SEARCH_NAMESPACES="${RHACS_SUBSCRIPTION_SEARCH_NAMESPACES:-openshift-operators ${RHACS_NAMESPACE} rhacs-operator}"
 
 # Function to check if a resource exists
 check_resource_exists() {
@@ -263,16 +266,21 @@ verify_route_encryption() {
     return 0
 }
 
-# Get the RHACS CSV name. Checks operator namespace first, then RHACS namespace.
+# Get the RHACS CSV name (highest installed version across operator + stackrox namespaces).
 # Returns e.g. rhacs-operator.v4.9.3. Empty if not found.
 get_rhacs_csv_name() {
-    local csv
-    csv=$(oc get csv -n "${RHACS_OPERATOR_NAMESPACE}" -o name 2>/dev/null | grep rhacs-operator | head -1 | sed 's|.*/||')
-    if [ -n "${csv}" ]; then
-        echo "${csv}"
-        return
-    fi
-    oc get csv -n "${RHACS_NAMESPACE}" -o name 2>/dev/null | grep rhacs-operator | head -1 | sed 's|.*/||' || echo ""
+    local best_csv="" best_ver="" csv ver
+    for ns in "${RHACS_OPERATOR_NAMESPACE}" "${RHACS_NAMESPACE}" openshift-operators; do
+        while IFS= read -r csv; do
+            [ -n "${csv}" ] || continue
+            ver=$(version_from_csv_name "${csv}")
+            if [ -z "${best_ver}" ] || { [ -n "${ver}" ] && version_gt "${ver}" "${best_ver}"; }; then
+                best_ver="${ver}"
+                best_csv="${csv}"
+            fi
+        done < <(oc get csv -n "${ns}" -o name 2>/dev/null | grep rhacs-operator | sed 's|.*/||' || true)
+    done
+    echo "${best_csv}"
 }
 
 # Get the namespace where the RHACS CSV is installed (for patching).
@@ -363,9 +371,9 @@ check_and_update_version() {
         print_info "Installed RHACS version: ${installed_version}"
     fi
     
-    local operator_channel
-    operator_channel=$(get_channel_for_version "${target_version}")
-    print_info "Operator channel: ${operator_channel}"
+    RHACS_RESOLVED_OPERATOR_CHANNEL=$(resolve_operator_channel_for_target "${target_version}")
+    local operator_channel="${RHACS_RESOLVED_OPERATOR_CHANNEL}"
+    print_info "Resolved operator channel: ${operator_channel} (auto=${RHACS_AUTO_OPERATOR_CHANNEL:-1})"
 
     local catalog_version installed_csv_version latest_version
     catalog_version=$(get_catalog_version_for_channel "${operator_channel}")
@@ -389,8 +397,9 @@ check_and_update_version() {
         if version_gt "${target_major_minor}" "${latest_major_minor}"; then
             print_warn "Target ${target_version} is not available on channel ${operator_channel} (catalog max: ${latest_version})"
             print_warn "Available operator channels: $(list_rhacs_operator_channels)"
-            print_warn "Skipping upgrade. Refresh the cluster catalog or set RHACS_OPERATOR_CHANNEL to a channel that provides 4.10"
+            print_warn "Skipping upgrade. Refresh the cluster catalog or set RHACS_AUTO_OPERATOR_CHANNEL=0 and RHACS_OPERATOR_CHANNEL=rhacs-${target_major_minor}"
             print_info "Continuing setup with installed version: ${installed_version}"
+            RHACS_VERSION_UPGRADE_SKIPPED=1
             return 0
         fi
     fi
@@ -421,18 +430,81 @@ check_and_update_version() {
     update_rhacs_version "${target_version}"
 }
 
-# Operator OLM channel for upgrades. Default stable (4.10); use rhacs-X.Y only when explicitly pinned.
-get_channel_for_version() {
-    local ver="$1"
+# True when catalog version satisfies target minor (e.g. 4.10.3 meets target 4.10).
+catalog_version_meets_target() {
+    local catalog_ver="$1"
+    local target_mm="$2"
+    local catalog_mm
+    catalog_mm=$(extract_major_minor "${catalog_ver}")
+    [ -n "${catalog_mm}" ] && ! version_gt "${target_mm}" "${catalog_mm}"
+}
+
+# Pick the OLM channel that can provide the target RHACS version (or the best available).
+resolve_operator_channel_for_target() {
+    local target_version="$1"
+    local target_mm channel catalog_ver catalog_mm
+    local -a candidates=() seen=()
+
+    target_mm=$(extract_major_minor "${target_version}")
 
     if [ "${RHACS_USE_VERSION_PINNED_CHANNEL:-0}" = "1" ]; then
-        local major_minor
-        major_minor=$(extract_major_minor "${ver}")
-        echo "rhacs-${major_minor}"
+        echo "rhacs-${target_mm}"
+        return 0
+    fi
+
+    if [ "${RHACS_AUTO_OPERATOR_CHANNEL:-1}" = "0" ] && [ -n "${RHACS_OPERATOR_CHANNEL:-}" ]; then
+        echo "${RHACS_OPERATOR_CHANNEL}"
+        return 0
+    fi
+
+    if [ -n "${RHACS_OPERATOR_CHANNEL:-}" ]; then
+        candidates+=("${RHACS_OPERATOR_CHANNEL}")
+    fi
+    candidates+=("stable" "rhacs-${target_mm}" "latest")
+
+    for channel in "${candidates[@]}"; do
+        local dup=false
+        for s in "${seen[@]:-}"; do
+            [ "${s}" = "${channel}" ] && dup=true && break
+        done
+        [ "${dup}" = true ] && continue
+        seen+=("${channel}")
+
+        catalog_ver=$(get_catalog_version_for_channel "${channel}")
+        if [ -n "${catalog_ver}" ] && catalog_version_meets_target "${catalog_ver}" "${target_mm}"; then
+            echo "${channel}"
+            return 0
+        fi
+    done
+
+    local best_ch="" best_mm=""
+    while IFS= read -r channel; do
+        [ -n "${channel}" ] || continue
+        catalog_ver=$(get_catalog_version_for_channel "${channel}")
+        [ -n "${catalog_ver}" ] || continue
+        catalog_mm=$(extract_major_minor "${catalog_ver}")
+        if [ -z "${best_mm}" ] || version_gt "${catalog_mm}" "${best_mm}"; then
+            best_mm="${catalog_mm}"
+            best_ch="${channel}"
+        fi
+    done < <(list_rhacs_operator_channels | tr ' ' '\n' | awk 'NF')
+
+    if [ -n "${best_ch}" ]; then
+        echo "${best_ch}"
         return 0
     fi
 
     echo "${RHACS_OPERATOR_CHANNEL:-stable}"
+}
+
+# Operator OLM channel for upgrades (delegates to auto-resolution).
+get_channel_for_version() {
+    local ver="$1"
+    if [ -n "${RHACS_RESOLVED_OPERATOR_CHANNEL}" ]; then
+        echo "${RHACS_RESOLVED_OPERATOR_CHANNEL}"
+        return 0
+    fi
+    resolve_operator_channel_for_target "${ver}"
 }
 
 # Extract major.minor from a version string (4.10.0 -> 4.10).
@@ -484,14 +556,15 @@ get_rhacs_subscription_namespace() {
 ensure_subscription_channel_for_version() {
     local target_version=$1
     local desired_channel
-    desired_channel=$(get_channel_for_version "${target_version}")
+    desired_channel=$(resolve_operator_channel_for_target "${target_version}")
+    RHACS_RESOLVED_OPERATOR_CHANNEL="${desired_channel}"
     local sub_name sub_ns
     sub_name=$(get_rhacs_subscription_name)
     sub_ns=$(get_rhacs_subscription_namespace)
     if [ -z "${sub_name}" ]; then
         print_warn "No RHACS subscription found (searched: ${RHACS_SUBSCRIPTION_SEARCH_NAMESPACES})"
         print_warn "Find it with: oc get subscription -A | grep rhacs"
-        print_warn "Without a subscription, the operator channel cannot switch to stable/4.10"
+        print_warn "Without a subscription, the operator channel cannot be updated for ${target_version}"
         return 1
     fi
 
@@ -510,7 +583,7 @@ ensure_subscription_channel_for_version() {
     current_channel=$(oc get subscriptions.operators.coreos.com "${sub_name}" -n "${sub_ns}" -o jsonpath='{.spec.channel}' 2>/dev/null || echo "")
     if [ "${current_channel}" = "${desired_channel}" ]; then
         print_info "Subscription already on channel: ${desired_channel} (namespace ${sub_ns})"
-        return 2
+        return 0
     fi
     print_step "Setting subscription channel: ${current_channel:-unknown} -> ${desired_channel} (namespace ${sub_ns})..."
     if ! oc patch subscriptions.operators.coreos.com "${sub_name}" -n "${sub_ns}" --type=json -p="[{\"op\":\"replace\",\"path\":\"/spec/channel\",\"value\":\"${desired_channel}\"}]" 2>/dev/null; then
@@ -529,12 +602,131 @@ get_central_cr_name() {
     oc get central -n "${RHACS_NAMESPACE}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo ""
 }
 
+# Approve pending OLM InstallPlans for the RHACS operator (Manual approval blocks upgrades).
+approve_pending_rhacs_installplans() {
+    local sub_ns
+    sub_ns=$(get_rhacs_subscription_namespace)
+    [ -n "${sub_ns}" ] || return 0
+    if ! command -v jq &>/dev/null; then
+        return 0
+    fi
+
+    local pending
+    pending=$(oc get installplan -n "${sub_ns}" -o json 2>/dev/null \
+        | jq -r '.items[] | select((.spec.clusterServiceVersionNames[]? // "") | test("rhacs")) | select(.spec.approved != true) | .metadata.name' 2>/dev/null || true)
+    for ip in ${pending}; do
+        [ -n "${ip}" ] || continue
+        print_step "Approving InstallPlan ${ip} in ${sub_ns}..."
+        oc patch installplan "${ip}" -n "${sub_ns}" --type=merge -p '{"spec":{"approved":true}}' 2>/dev/null || \
+            print_warn "Could not approve InstallPlan ${ip}"
+    done
+}
+
+# Periodic upgrade diagnostics: subscription, InstallPlan, operator CSV, Central deployment.
+print_rhacs_upgrade_status() {
+    local sub_name sub_ns
+    sub_name=$(get_rhacs_subscription_name)
+    sub_ns=$(get_rhacs_subscription_namespace)
+
+    if [ -n "${sub_name}" ]; then
+        local sub_channel sub_state sub_approval install_plan
+        sub_channel=$(oc get subscriptions.operators.coreos.com "${sub_name}" -n "${sub_ns}" -o jsonpath='{.spec.channel}' 2>/dev/null || echo "?")
+        sub_state=$(oc get subscriptions.operators.coreos.com "${sub_name}" -n "${sub_ns}" -o jsonpath='{.status.state}' 2>/dev/null || echo "?")
+        sub_approval=$(oc get subscriptions.operators.coreos.com "${sub_name}" -n "${sub_ns}" -o jsonpath='{.spec.installPlanApproval}' 2>/dev/null || echo "Automatic")
+        install_plan=$(oc get subscriptions.operators.coreos.com "${sub_name}" -n "${sub_ns}" -o jsonpath='{.status.installplan.name}{.status.installPlanRef.name}' 2>/dev/null || echo "")
+        print_info "  Subscription ${sub_ns}/${sub_name}: channel=${sub_channel} state=${sub_state} approval=${sub_approval}${install_plan:+ installPlan=${install_plan}}"
+        if [ -n "${install_plan}" ]; then
+            local ip_phase ip_approved
+            ip_phase=$(oc get installplan "${install_plan}" -n "${sub_ns}" -o jsonpath='{.status.phase}' 2>/dev/null || echo "?")
+            ip_approved=$(oc get installplan "${install_plan}" -n "${sub_ns}" -o jsonpath='{.spec.approved}' 2>/dev/null || echo "?")
+            print_info "  InstallPlan ${install_plan}: phase=${ip_phase} approved=${ip_approved}"
+        fi
+    fi
+
+    local csv_name csv_ns csv_ver
+    csv_name=$(get_rhacs_csv_name)
+    csv_ns=$(get_rhacs_csv_namespace)
+    csv_ver=$(get_latest_available_version)
+    print_info "  Operator CSV: ${csv_ns}/${csv_name:-none} (version ${csv_ver:-unknown})"
+
+    local central_img central_ready central_updated
+    central_img=$(get_current_image_tag)
+    central_ready=$(oc get deployment central -n "${RHACS_NAMESPACE}" -o jsonpath='{.status.readyReplicas}/{.status.replicas}' 2>/dev/null || echo "?")
+    central_updated=$(oc get deployment central -n "${RHACS_NAMESPACE}" -o jsonpath='{.status.conditions[?(@.type=="Progressing")].message}' 2>/dev/null | head -c 120 || echo "")
+    print_info "  Central deployment: image=${central_img:-?} ready=${central_ready}${central_updated:+ (${central_updated})}"
+
+    local central_cr_name central_status
+    central_cr_name=$(get_central_cr_name)
+    if [ -n "${central_cr_name}" ]; then
+        central_status=$(oc get central "${central_cr_name}" -n "${RHACS_NAMESPACE}" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}{" "}{.status.conditions[?(@.type=="Progressing")].message}' 2>/dev/null | head -c 160 || echo "")
+        print_info "  Central CR ${central_cr_name}: ${central_status:-no status}"
+    fi
+}
+
+# Wait until the installed operator CSV reaches target major.minor (Central follows operator upgrade).
+wait_for_operator_csv_version() {
+    local target_mm="$1"
+    local max_wait="${2:-${RHACS_OPERATOR_CSV_WAIT_SEC:-600}}"
+    local elapsed=0 csv_mm
+
+    print_info "Waiting for operator CSV to reach ${target_mm} (up to ${max_wait}s)..."
+    while [ "${elapsed}" -lt "${max_wait}" ]; do
+        approve_pending_rhacs_installplans
+        csv_mm=$(extract_major_minor "$(get_latest_available_version 2>/dev/null || echo "")")
+        if [ -n "${csv_mm}" ] && ! version_gt "${target_mm}" "${csv_mm}"; then
+            print_info "✓ Operator CSV at ${csv_mm} (target ${target_mm})"
+            return 0
+        fi
+        print_info "Operator CSV: ${csv_mm:-unknown} (target ${target_mm}, ${elapsed}s/${max_wait}s)"
+        print_rhacs_upgrade_status
+        sleep 30
+        elapsed=$((elapsed + 30))
+    done
+    print_warn "Operator CSV did not reach ${target_mm} within ${max_wait}s (current: ${csv_mm:-unknown})"
+    return 1
+}
+
+# Wait for Central deployment to reach target major.minor with periodic status output.
+wait_for_central_target_version() {
+    local target_mm="$1"
+    local max_wait="${2:-${RHACS_CENTRAL_UPGRADE_WAIT_SEC:-600}}"
+    local elapsed=0 current_ver current_mm last_status_at=-999
+
+    print_info "Waiting for Central to reach ${target_mm} (up to ${max_wait}s)..."
+    while [ "${elapsed}" -lt "${max_wait}" ]; do
+        approve_pending_rhacs_installplans
+        current_ver=$(get_installed_version)
+        current_mm=$(extract_major_minor "${current_ver}")
+
+        if [ -n "${current_mm}" ] && [ "${current_mm}" = "${target_mm}" ]; then
+            if oc rollout status deployment/central -n "${RHACS_NAMESPACE}" --timeout=120s 2>/dev/null; then
+                print_info "✓ Central at target version ${current_ver}, rollout complete"
+                return 0
+            fi
+        fi
+
+        if [ $((elapsed - last_status_at)) -ge 30 ] || [ "${elapsed}" -eq 0 ]; then
+            print_info "Central version: ${current_ver:-unknown} (target ${target_mm}, ${elapsed}s/${max_wait}s)"
+            print_rhacs_upgrade_status
+            last_status_at=${elapsed}
+        fi
+
+        sleep 15
+        elapsed=$((elapsed + 15))
+    done
+
+    print_warn "Timeout waiting for Central ${target_mm}. Current: $(get_installed_version)"
+    print_warn "Check: oc get subscription,installplan,csv -A | grep rhacs; oc describe central -n ${RHACS_NAMESPACE}"
+    print_rhacs_upgrade_status
+    return 1
+}
+
 # Function to update RHACS version
 update_rhacs_version() {
     local target_version=$1
     local target_major_minor
     target_major_minor=$(extract_major_minor "${target_version}")
-    local upgrade_initiated=false
+    local has_subscription=false
 
     print_info "Updating RHACS to version ${target_version}..."
 
@@ -545,10 +737,14 @@ update_rhacs_version() {
     if [ -n "${central_cr_name}" ]; then
         print_info "Updating Central resource (${central_cr_name})..."
 
-        local sub_rc=0
-        ensure_subscription_channel_for_version "${target_version}" || sub_rc=$?
-        if [ "${sub_rc}" -eq 0 ]; then
-            upgrade_initiated=true
+        if [ -n "$(get_rhacs_subscription_name)" ]; then
+            has_subscription=true
+            if ensure_subscription_channel_for_version "${target_version}"; then
+                approve_pending_rhacs_installplans
+                wait_for_operator_csv_version "${target_major_minor}" || true
+            else
+                print_warn "Subscription channel could not be set; Central upgrade may stall"
+            fi
         fi
 
         local current_image
@@ -563,60 +759,25 @@ update_rhacs_version() {
                 print_error "Failed to update Central image"
                 return 1
             }
-            upgrade_initiated=true
+        elif [ "${has_subscription}" = true ]; then
+            print_info "Central has no custom image; operator will reconcile Central after CSV upgrade"
+        elif ensure_csv_deploy_version "${target_version}"; then
+            print_info "No subscription found; patched operator CSV deploy details as fallback"
         else
-            print_info "Central has no custom image; upgrade depends on operator subscription/CSV channel"
-        fi
-
-        if [ "${upgrade_initiated}" != "true" ]; then
-            if ensure_csv_deploy_version "${target_version}"; then
-                upgrade_initiated=true
-            fi
-        fi
-
-        local installed_now
-        installed_now=$(get_installed_version)
-        local installed_mm
-        installed_mm=$(extract_major_minor "${installed_now}")
-
-        if [ "${upgrade_initiated}" != "true" ]; then
-            print_warn "No upgrade action was applied (no subscription channel change, Central image, or CSV patch)"
-            print_warn "Remaining on installed version: ${installed_now:-unknown}"
+            print_warn "No subscription and CSV patch failed; cannot drive Central upgrade"
             return 0
         fi
+
+        local installed_now installed_mm
+        installed_now=$(get_installed_version)
+        installed_mm=$(extract_major_minor "${installed_now}")
 
         if [ -n "${installed_mm}" ] && [ "${installed_mm}" = "${target_major_minor}" ]; then
             print_info "✓ RHACS already at target version ${installed_now}"
             return 0
         fi
 
-        print_info "Waiting for Central to reach ${target_version} (current: ${installed_now:-unknown})..."
-        local max_wait=600
-        local elapsed=0
-        local last_reported_ver=""
-        while [ "${elapsed}" -lt "${max_wait}" ]; do
-            local current_ver current_mm
-            current_ver=$(get_installed_version)
-            current_mm=$(extract_major_minor "${current_ver}")
-
-            if [ -n "${current_mm}" ] && [ "${current_mm}" = "${target_major_minor}" ]; then
-                if oc rollout status deployment/central -n "${RHACS_NAMESPACE}" --timeout=120s 2>/dev/null; then
-                    print_info "✓ Central at target version ${current_ver}, rollout complete"
-                    return 0
-                fi
-            fi
-
-            if [ "${current_ver}" != "${last_reported_ver}" ]; then
-                print_info "Central version: ${current_ver:-unknown} (waiting for ${target_major_minor})..."
-                last_reported_ver="${current_ver}"
-            fi
-
-            sleep 20
-            elapsed=$((elapsed + 20))
-        done
-
-        print_warn "Timeout waiting for version ${target_version}. Current: $(get_installed_version)"
-        print_warn "Check operator channel/CSV and Central CR: oc get subscription,csv -A | grep rhacs; oc get central -n ${RHACS_NAMESPACE} -o yaml"
+        wait_for_central_target_version "${target_major_minor}" || true
         return 0
     else
         # No Central CR: try subscription channel first, then CSV deploy details
@@ -928,19 +1089,26 @@ resolve_rhacs_console_plugin_name() {
 wait_for_rhacs_target_version() {
     local target_mm="${1:-4.10}"
     local max_wait="${RHACS_VERSION_WAIT_SEC:-600}"
-    local elapsed=0 installed_mm
+    local elapsed=0 installed_mm last_status_at=-999
 
     print_info "Waiting for RHACS ${target_mm} before enabling Console plugin (up to ${max_wait}s)..."
     while [ "${elapsed}" -lt "${max_wait}" ]; do
+        approve_pending_rhacs_installplans
         installed_mm=$(extract_major_minor "$(get_installed_version 2>/dev/null || echo "")")
         if [ -n "${installed_mm}" ] && ! version_gt "${target_mm}" "${installed_mm}"; then
             print_info "✓ RHACS at ${installed_mm} (target ${target_mm})"
             return 0
         fi
+        if [ $((elapsed - last_status_at)) -ge 30 ] || [ "${elapsed}" -eq 0 ]; then
+            print_info "RHACS version: ${installed_mm:-unknown} (target ${target_mm}, ${elapsed}s/${max_wait}s)"
+            print_rhacs_upgrade_status
+            last_status_at=${elapsed}
+        fi
         sleep 15
         elapsed=$((elapsed + 15))
     done
     print_warn "RHACS not at ${target_mm} yet after ${max_wait}s; Console plugin may be unavailable until upgrade completes"
+    print_rhacs_upgrade_status
     return 1
 }
 
@@ -969,11 +1137,22 @@ ensure_rhacs_console_plugin_enabled() {
         return 0
     fi
 
-    wait_for_rhacs_target_version "${target_mm}" || true
     installed_mm=$(extract_major_minor "$(get_installed_version 2>/dev/null || echo "")")
 
+    if [ "${RHACS_VERSION_UPGRADE_SKIPPED:-0}" = "1" ] || \
+       { [ -n "${installed_mm}" ] && version_gt "${target_mm}" "${installed_mm}"; }; then
+        print_warn "RHACS ${installed_mm:-unknown} is below ${target_mm}; skipping Console plugin (requires 4.10+ operator/Central/SecuredCluster)"
+        print_info "Upgrade first: ensure subscription is on rhacs-${target_mm} (e.g. openshift-operators), then rerun this script"
+        diagnose_rhacs_console_plugin
+        return 0
+    fi
+
+    wait_for_rhacs_target_version "${target_mm}" || true
+    installed_mm=$(extract_major_minor "$(get_installed_version 2>/dev/null || echo "")")
     if [ -n "${installed_mm}" ] && version_gt "${target_mm}" "${installed_mm}"; then
-        print_warn "RHACS ${installed_mm} is below ${target_mm}; console plugin requires the ${target_mm} operator/Central/SecuredCluster stack"
+        print_warn "RHACS still at ${installed_mm} after wait; skipping Console plugin until upgrade completes"
+        diagnose_rhacs_console_plugin
+        return 0
     fi
 
     if ! secured_cluster_present_for_console_plugin; then
@@ -1010,7 +1189,7 @@ ensure_rhacs_console_plugin_enabled() {
 main() {
     print_info "RHACS Installation Verification"
     print_info "================================="
-    print_info "Defaults: version=${RHACS_VERSION}, operator channel=${RHACS_OPERATOR_CHANNEL}, console plugin=${RHACS_CONSOLE_PLUGIN_NAME}"
+    print_info "Defaults: version=${RHACS_VERSION}, channel=auto (prefers ${RHACS_OPERATOR_CHANNEL}), console plugin=${RHACS_CONSOLE_PLUGIN_NAME}"
     
     # Verify RHACS installation
     if ! verify_rhacs_installation; then

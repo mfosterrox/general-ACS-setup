@@ -54,8 +54,11 @@ git pull origin main
 | `RHACS_ROUTE_NAME` | No | `central` | OpenShift route name for Central |
 | `RHACS_VERSION` | No | `4.10` | Target version (defaults to latest stable via `RHACS_DEFAULT_VERSION`) |
 | `RHACS_DEFAULT_VERSION` | No | `4.10` | Default upgrade target when `RHACS_VERSION` is unset |
-| `RHACS_OPERATOR_CHANNEL` | No | `stable` | OLM subscription channel — **exported by default** so upgrades target RHACS 4.10 |
-| `RHACS_USE_VERSION_PINNED_CHANNEL` | No | `0` | Set to `1` to use `rhacs-X.Y` channel names instead of `stable` |
+| `RHACS_OPERATOR_CHANNEL` | No | `stable` | Preferred OLM channel; auto-resolution tries `rhacs-X.Y` when `stable` lags |
+| `RHACS_AUTO_OPERATOR_CHANNEL` | No | `1` | Auto-pick best channel for `RHACS_VERSION` (e.g. `rhacs-4.10` when `stable` is 4.9.2) |
+| `RHACS_OPERATOR_NAMESPACE` | No | `openshift-operators` | Where to find the subscription (AllNamespaces installs) |
+| `RHACS_SUBSCRIPTION_SEARCH_NAMESPACES` | No | `openshift-operators stackrox rhacs-operator` | Subscription discovery order |
+| `RHACS_USE_VERSION_PINNED_CHANNEL` | No | `0` | Set to `1` to force `rhacs-X.Y` only |
 | `RHACS_CONSOLE_PLUGIN_NAME` | No | `advanced-cluster-security` | OpenShift Console security plugin (4.10 vulnerability/VM views) |
 | `RHACS_ENSURE_CONSOLE_PLUGIN` | No | `1` | Set to `0` to skip enabling the Console security plugin |
 | `RHACS_SKIP_VERSION_UPDATE` | No | `0` | Set to `1` to keep installed version (no upgrade attempt) |
@@ -150,7 +153,7 @@ source ~/.bashrc
 The RHACS 4.10 console integration requires **all** of the following on the **same** OpenShift cluster:
 
 1. **OpenShift 4.19+** (per [RHACS 4.10 docs](https://docs.redhat.com/en/documentation/red_hat_advanced_cluster_security_for_kubernetes/4.10/html/configuring/accessing-vulnerability-information-in-web-console))
-2. **RHACS 4.10** Central and SecuredCluster (operator on channel `stable`)
+2. **RHACS 4.10** Central and SecuredCluster (operator on `stable` or `rhacs-4.10` after auto channel resolution)
 3. **SecuredCluster** installed in `stackrox` — Central alone does not deploy the plugin
 4. `advanced-cluster-security` in `consoles.operator.openshift.io/cluster` `spec.plugins`
 5. OpenShift Console rollout complete (hard-refresh browser: Ctrl+Shift+R)

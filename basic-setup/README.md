@@ -27,11 +27,15 @@ export ROX_CENTRAL_ADDRESS="https://central-stackrox.apps.<cluster-domain>"
 | `RHACS_ROUTE_NAME` | `central` | Route name for URL discovery |
 | `RHACS_VERSION` | `4.10` | Target version (defaults to `RHACS_DEFAULT_VERSION`) |
 | `RHACS_DEFAULT_VERSION` | `4.10` | Latest stable default upgrade target |
-| `RHACS_OPERATOR_CHANNEL` | `stable` | OLM channel — exported by default for RHACS 4.10 upgrades |
-| `RHACS_USE_VERSION_PINNED_CHANNEL` | `0` | Use `rhacs-X.Y` channels when set to `1` |
+| `RHACS_OPERATOR_CHANNEL` | `stable` | Preferred OLM channel (tried first when auto-resolution is on) |
+| `RHACS_AUTO_OPERATOR_CHANNEL` | `1` | Auto-switch subscription to `rhacs-4.10` (etc.) when `stable` cannot provide target |
+| `RHACS_OPERATOR_NAMESPACE` | `openshift-operators` | Subscription namespace for AllNamespaces operator installs |
+| `RHACS_USE_VERSION_PINNED_CHANNEL` | `0` | Use `rhacs-X.Y` channels only when set to `1` |
 | `RHACS_CONSOLE_PLUGIN_NAME` | `advanced-cluster-security` | OpenShift Console security plugin |
 | `RHACS_ENSURE_CONSOLE_PLUGIN` | `1` | Enable Console security plugin after upgrade (set `0` to skip) |
 | `RHACS_SKIP_VERSION_UPDATE` | `0` | Set to `1` to skip version management |
+| `RHACS_OPERATOR_CSV_WAIT_SEC` | `600` | Wait for operator CSV to reach target before Central wait |
+| `RHACS_CENTRAL_UPGRADE_WAIT_SEC` | `600` | Wait for Central deployment to reach target version |
 | `RHACS_FORCE_DOWNGRADE` | `false` | Allow downgrade to older version |
 | `SKIP_COLLECTOR_NETWORK_CONFIG` | `0` | Skip script 02 |
 | `ROX_NON_AGGREGATED_NETWORKS` | auto-detect | Manual CIDR override for collector |
@@ -91,32 +95,28 @@ curl -k -H "Authorization: Bearer $ROX_API_TOKEN" "$ROX_CENTRAL_ADDRESS/v1/auth/
 
 ## Version Management
 
-By default the script upgrades to **4.10** (`RHACS_DEFAULT_VERSION`) using the OLM **`stable`** operator channel (per [Red Hat RHACS 4.10 upgrade docs](https://docs.redhat.com/en/documentation/red_hat_advanced_cluster_security_for_kubernetes/4.10/html/upgrading/upgrade-operator)). Override with `RHACS_VERSION` or disable with `RHACS_SKIP_VERSION_UPDATE=1`.
+By default the script upgrades to **4.10** (`RHACS_DEFAULT_VERSION`) and **auto-resolves** the OLM channel: tries `stable`, then `rhacs-4.10`, then `latest`, and patches the subscription in `openshift-operators` (typical AllNamespaces install). Override with `RHACS_VERSION` or disable with `RHACS_SKIP_VERSION_UPDATE=1`.
 
-If your subscription is pinned to `rhacs-4.9` (or the script previously targeted `rhacs-4.10`), the channel will not advance to 4.10. The setup script patches the subscription to `stable` unless you set `RHACS_OPERATOR_CHANNEL` or `RHACS_USE_VERSION_PINNED_CHANNEL=1`.
-
-The script checks the **catalog** on the target channel (not only the installed CSV). If `stable` in `openshift-marketplace` cannot provide 4.10 yet, the upgrade is skipped with available channels listed in the log.
-
-| Current | Target (default) | `stable` catalog | Result |
-|---------|------------------|------------------|--------|
-| 4.9.2 on `rhacs-4.9` | 4.10 (default) | 4.9.2 only | Skipped — refresh catalog or wait for 4.10 on `stable` |
-| 4.9.2 on `rhacs-4.9` | 4.10 | 4.10.x | Patches channel to `stable`, upgrades |
-| 4.9.2 | — | any | No upgrade if `RHACS_SKIP_VERSION_UPDATE=1` |
-| 4.9.3 | 4.9.2 | 4.9.2 | Refuses downgrade unless `RHACS_FORCE_DOWNGRADE=true` |
-
-Manual channel fix:
+When `stable` only offers 4.9.2 but `rhacs-4.10` offers 4.10.3, the script patches:
 
 ```bash
-oc get subscription -A | grep rhacs
-oc patch subscription rhacs-operator -n <namespace> --type=merge -p='{"spec":{"channel":"stable"}}'
-oc get packagemanifest rhacs-operator -n openshift-marketplace -o jsonpath='{.status.channels[*].name}{"\n"}'
+oc patch subscription rhacs-operator -n openshift-operators --type=merge \
+  -p='{"spec":{"channel":"rhacs-4.10"}}'
 ```
+
+Set `RHACS_AUTO_OPERATOR_CHANNEL=0` and `RHACS_OPERATOR_CHANNEL=stable` to disable auto channel selection.
+
+| Current | Target | `stable` | `rhacs-4.10` | Result |
+|---------|--------|----------|--------------|--------|
+| 4.9.2 | 4.10 | 4.9.2 | 4.10.3 | Auto-patches to `rhacs-4.10`, upgrades |
+| 4.9.2 | 4.10 | 4.9.2 | missing | Skipped — catalog refresh needed |
+| 4.9.2 | — | any | any | No upgrade if `RHACS_SKIP_VERSION_UPDATE=1` |
 
 ## OpenShift Console Security Plugin
 
 RHACS 4.10 ships a dynamic OpenShift Console plugin (`advanced-cluster-security`) that surfaces vulnerability data in the console — including VM workloads on OpenShift Virtualization. The setup script:
 
-1. Upgrades to 4.10 on channel `stable`
+1. Auto-resolves the operator channel (e.g. `rhacs-4.10` when `stable` lags) and upgrades to 4.10
 2. Waits for the `ConsolePlugin` CR
 3. Patches `consoles.operator.openshift.io/cluster` to enable the plugin
 
