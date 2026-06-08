@@ -42,6 +42,8 @@ export RHACS_DEFAULT_VERSION="${RHACS_DEFAULT_VERSION:-4.10}"
 export RHACS_VERSION="${RHACS_VERSION:-${RHACS_DEFAULT_VERSION}}"
 export RHACS_OPERATOR_CHANNEL="${RHACS_OPERATOR_CHANNEL:-stable}"
 export RHACS_AUTO_OPERATOR_CHANNEL="${RHACS_AUTO_OPERATOR_CHANNEL:-1}"
+export RHACS_USE_LIVE_CATALOG="${RHACS_USE_LIVE_CATALOG:-1}"
+export RHACS_FIX_ARGOCD_CATALOG_DRIFT="${RHACS_FIX_ARGOCD_CATALOG_DRIFT:-1}"
 RHACS_RESOLVED_OPERATOR_CHANNEL=""
 RHACS_VERSION_UPGRADE_SKIPPED=0
 
@@ -109,6 +111,263 @@ version_from_csv_name() {
 list_rhacs_operator_channels() {
     oc get packagemanifest rhacs-operator -n openshift-marketplace -o json 2>/dev/null \
         | jq -r '.status.channels[].name' 2>/dev/null | sort -u | tr '\n' ' '
+}
+
+# Human-readable channel -> CSV listing from the cluster OperatorHub catalog.
+list_rhacs_catalog_channel_details() {
+    oc get packagemanifest rhacs-operator -n openshift-marketplace -o json 2>/dev/null \
+        | jq -r '.status.channels[] | "\(.name) -> \(.currentCSV)"' 2>/dev/null | sort -u
+}
+
+# Subscription catalog source (e.g. redhat-operators vs redhat-operators-snapshot).
+get_rhacs_subscription_catalog_source() {
+    local sub_name sub_ns
+    sub_name=$(get_rhacs_subscription_name)
+    sub_ns=$(get_rhacs_subscription_namespace)
+    [ -n "${sub_name}" ] || return 1
+    oc get subscriptions.operators.coreos.com "${sub_name}" -n "${sub_ns}" \
+        -o jsonpath='{.spec.source}{" "}{.spec.sourceNamespace}' 2>/dev/null
+}
+
+# Diagnose why RHACS 4.10 may be missing from the console channel list.
+diagnose_rhacs_operator_catalog() {
+    local target_mm sub_source sub_source_ns approval disable_defaults catalog_max
+    target_mm=$(extract_major_minor "${RHACS_VERSION:-${RHACS_DEFAULT_VERSION}}")
+
+    print_step "RHACS operator catalog diagnostics"
+    print_info "Cluster OpenShift version: $(get_openshift_cluster_version 2>/dev/null || echo unknown)"
+    print_info "Target RHACS version: ${target_mm}"
+
+    print_info "Packagemanifest channels (what OperatorHub can offer):"
+    local channel_lines=0
+    while IFS= read -r line; do
+        [ -n "${line}" ] || continue
+        print_info "  ${line}"
+        channel_lines=$((channel_lines + 1))
+    done < <(list_rhacs_catalog_channel_details)
+    if [ "${channel_lines}" -eq 0 ]; then
+        print_warn "  rhacs-operator not found in openshift-marketplace packagemanifest"
+    fi
+
+    sub_source=$(get_rhacs_subscription_catalog_source 2>/dev/null || echo "")
+    if [ -n "${sub_source}" ]; then
+        sub_source_ns="${sub_source#* }"
+        sub_source="${sub_source%% *}"
+        print_info "Subscription catalog source: ${sub_source} (namespace ${sub_source_ns})"
+        if [[ "${sub_source}" == *snapshot* ]]; then
+            print_warn "Subscription uses a SNAPSHOT catalog (${sub_source}) — channels are frozen and often stop at 4.9.x"
+            print_warn "Switch to the live catalog to see RHACS 4.10 in the console:"
+            print_info "  oc patch subscription rhacs-operator -n openshift-operators --type=merge -p '{\"spec\":{\"source\":\"redhat-operators\",\"sourceNamespace\":\"openshift-marketplace\",\"channel\":\"stable\"}}'"
+            print_info "  Or set RHACS_USE_LIVE_CATALOG=1 and rerun this script to apply automatically"
+        fi
+    fi
+
+    local sub_name sub_ns argocd_app
+    sub_name=$(get_rhacs_subscription_name)
+    sub_ns=$(get_rhacs_subscription_namespace)
+    if [ -n "${sub_name}" ]; then
+        argocd_app=$(oc get subscriptions.operators.coreos.com "${sub_name}" -n "${sub_ns}" \
+            -o jsonpath='{.metadata.annotations.argocd\.argoproj\.io/tracking-id}' 2>/dev/null || echo "")
+        if [ -n "${argocd_app}" ]; then
+            argocd_app="${argocd_app%%:*}"
+            print_warn "Subscription is managed by Argo CD (app: ${argocd_app}) — manual oc patch will be reverted on sync"
+            print_info "  Update the Subscription in Git (source: redhat-operators), then sync app ${argocd_app}"
+            print_info "  Or pause sync: argocd app set ${argocd_app} --sync-policy none"
+            print_info "  Or ignore drift: argocd app set ${argocd_app} --sync-option IgnoreExtraneous=true (and add ignoreDifferences for spec.source)"
+        fi
+    fi
+
+    approval=$(oc get subscriptions.operators.coreos.com "$(get_rhacs_subscription_name)" \
+        -n "$(get_rhacs_subscription_namespace)" -o jsonpath='{.spec.installPlanApproval}' 2>/dev/null || echo "")
+    if [ "${approval}" = "Manual" ]; then
+        print_warn "Subscription installPlanApproval=Manual — approve updates in Console: Installed Operators → RHACS → Subscription → InstallPlan"
+        print_info "  Or set Automatic: oc patch subscription rhacs-operator -n openshift-operators --type=merge -p '{\"spec\":{\"installPlanApproval\":\"Automatic\"}}'"
+    fi
+
+    if oc get operatorhub cluster &>/dev/null; then
+        disable_defaults=$(oc get operatorhub cluster -o jsonpath='{.spec.disableAllDefaultSources}' 2>/dev/null || echo "false")
+        if [ "${disable_defaults}" = "true" ]; then
+            print_warn "OperatorHub disableAllDefaultSources=true — default redhat-operators catalog may be disabled"
+            print_info "  Re-enable: oc patch operatorhub cluster --type=merge -p '{\"spec\":{\"disableAllDefaultSources\":false}}'"
+        fi
+    fi
+
+    catalog_max=$(oc get packagemanifest rhacs-operator -n openshift-marketplace -o json 2>/dev/null \
+        | jq -r '[.status.channels[].currentCSV | capture("v(?<v>[0-9]+\\.[0-9]+(\\.[0-9]+)?)").v] | max_by(split(".") | map(tonumber))' 2>/dev/null || echo "")
+    if [ -n "${catalog_max}" ] && version_gt "${target_mm}" "${catalog_max}"; then
+        print_error "Catalog max RHACS version is ${catalog_max}; ${target_mm} is not available on this cluster's operator catalog"
+        print_info "Refresh live catalog: oc delete pod -n openshift-marketplace -l olm.catalogSource=redhat-operators"
+        print_info "Then recheck: oc get packagemanifest rhacs-operator -n openshift-marketplace -o json | jq -r '.status.channels[] | \"\\(.name) -> \\(.currentCSV)\"'"
+    fi
+}
+
+# Argo CD app name from subscription tracking-id (e.g. acs:operators.coreos.com/... -> acs).
+get_rhacs_argocd_app_name() {
+    local sub_name sub_ns tracking_id
+    sub_name=$(get_rhacs_subscription_name)
+    sub_ns=$(get_rhacs_subscription_namespace)
+    [ -n "${sub_name}" ] || return 1
+    tracking_id=$(oc get subscriptions.operators.coreos.com "${sub_name}" -n "${sub_ns}" \
+        -o jsonpath='{.metadata.annotations.argocd\.argoproj\.io/tracking-id}' 2>/dev/null || echo "")
+    [ -n "${tracking_id}" ] || return 1
+    echo "${tracking_id%%:*}"
+}
+
+# Namespace of the Argo CD Application CR (OpenShift GitOps default: openshift-gitops).
+get_rhacs_argocd_app_namespace() {
+    local app_name="$1"
+    local ns
+    [ -n "${app_name}" ] || return 1
+    if [ -n "${RHACS_ARGOCD_APP_NAMESPACE:-}" ]; then
+        echo "${RHACS_ARGOCD_APP_NAMESPACE}"
+        return 0
+    fi
+    ns=$(oc get applications.argoproj.io -A -o json 2>/dev/null \
+        | jq -r --arg app "${app_name}" '.items[] | select(.metadata.name == $app) | .metadata.namespace' 2>/dev/null | head -1)
+    if [ -n "${ns}" ]; then
+        echo "${ns}"
+        return 0
+    fi
+    echo "openshift-gitops"
+}
+
+# Prevent Argo CD from reverting live-catalog subscription changes (ignoreDifferences on Subscription).
+ensure_argocd_allows_subscription_catalog_upgrade() {
+    local app_name app_ns sub_name sub_ns
+    if [ "${RHACS_FIX_ARGOCD_CATALOG_DRIFT:-1}" != "1" ]; then
+        return 0
+    fi
+    if ! command -v jq &>/dev/null; then
+        print_warn "jq required for Argo CD catalog drift fix; skipping"
+        return 1
+    fi
+
+    app_name=$(get_rhacs_argocd_app_name 2>/dev/null || echo "")
+    [ -n "${app_name}" ] || return 0
+
+    app_ns=$(get_rhacs_argocd_app_namespace "${app_name}")
+    sub_name=$(get_rhacs_subscription_name)
+    sub_ns=$(get_rhacs_subscription_namespace)
+
+    if ! oc get applications.argoproj.io "${app_name}" -n "${app_ns}" &>/dev/null; then
+        print_warn "Argo CD Application ${app_ns}/${app_name} not found; subscription changes may be reverted on sync"
+        return 1
+    fi
+
+    local has_source_ignore
+    has_source_ignore=$(oc get applications.argoproj.io "${app_name}" -n "${app_ns}" -o json 2>/dev/null \
+        | jq -r --arg sub "${sub_name}" --arg ns "${sub_ns}" '
+            [.spec.ignoreDifferences[]? |
+                select(.group == "operators.coreos.com" and .kind == "Subscription" and .name == $sub and (.namespace == $ns or .namespace == null)) |
+                .jqPathExpressions[]? | select(. == ".spec.source")] | length
+        ' 2>/dev/null || echo "0")
+
+    if [ "${has_source_ignore:-0}" -gt 0 ]; then
+        print_info "Argo CD app ${app_ns}/${app_name} already ignores Subscription catalog drift"
+        return 0
+    fi
+
+    print_step "Configuring Argo CD app ${app_ns}/${app_name} to allow RHACS subscription catalog upgrades..."
+    oc get applications.argoproj.io "${app_name}" -n "${app_ns}" -o json 2>/dev/null \
+        | jq --arg sub "${sub_name}" --arg ns "${sub_ns}" '
+            .spec.ignoreDifferences = ((.spec.ignoreDifferences // []) + [{
+                group: "operators.coreos.com",
+                kind: "Subscription",
+                namespace: $ns,
+                name: $sub,
+                jqPathExpressions: [
+                    ".spec.source",
+                    ".spec.sourceNamespace",
+                    ".spec.channel",
+                    ".spec.installPlanApproval"
+                ]
+            }])
+        ' | oc apply -f - 2>/dev/null || {
+        print_warn "Could not patch Argo CD Application ${app_ns}/${app_name}"
+        return 1
+    }
+    print_info "✓ Argo CD will no longer revert subscription source/channel to snapshot catalog"
+    return 0
+}
+
+# Refresh redhat-operators catalog pods after switching subscription source.
+refresh_redhat_operators_catalog() {
+    local deleted
+    deleted=$(oc delete pod -n openshift-marketplace -l olm.catalogSource=redhat-operators --wait=false 2>/dev/null || true)
+    if [ -n "${deleted}" ]; then
+        print_info "Refreshing redhat-operators catalog pods..."
+        sleep 15
+    fi
+}
+
+# Point subscription at live redhat-operators when snapshot catalog blocks upgrades.
+ensure_live_redhat_operators_catalog() {
+    local sub_name sub_ns current_source desired_channel target_version elapsed=0
+    sub_name=$(get_rhacs_subscription_name)
+    sub_ns=$(get_rhacs_subscription_namespace)
+    [ -n "${sub_name}" ] || return 1
+
+    current_source=$(oc get subscriptions.operators.coreos.com "${sub_name}" -n "${sub_ns}" \
+        -o jsonpath='{.spec.source}' 2>/dev/null || echo "")
+    if [ "${current_source}" = "redhat-operators" ]; then
+        return 0
+    fi
+
+    if [ "${RHACS_USE_LIVE_CATALOG:-1}" = "0" ]; then
+        print_warn "Subscription uses ${current_source:-unknown}; set RHACS_USE_LIVE_CATALOG=1 to switch to redhat-operators"
+        return 1
+    fi
+
+    if [[ "${current_source}" != *snapshot* ]]; then
+        print_warn "Subscription source is ${current_source:-unknown} (not a snapshot); only *snapshot* catalogs are auto-switched"
+        return 1
+    fi
+
+    target_version="${RHACS_VERSION:-${RHACS_DEFAULT_VERSION}}"
+    desired_channel=$(resolve_operator_channel_for_target "${target_version}")
+
+    ensure_argocd_allows_subscription_catalog_upgrade || true
+
+    print_step "Switching subscription catalog: ${current_source:-unknown} -> redhat-operators (channel ${desired_channel})..."
+    oc patch subscriptions.operators.coreos.com "${sub_name}" -n "${sub_ns}" --type=merge -p "{
+        \"spec\": {
+            \"source\": \"redhat-operators\",
+            \"sourceNamespace\": \"openshift-marketplace\",
+            \"channel\": \"${desired_channel}\",
+            \"installPlanApproval\": \"Automatic\"
+        }
+    }" || {
+        print_warn "Could not switch subscription to redhat-operators"
+        return 1
+    }
+
+    refresh_redhat_operators_catalog
+
+    print_info "Waiting for subscription source to reconcile (up to 90s)..."
+    while [ "${elapsed}" -lt 90 ]; do
+        current_source=$(oc get subscriptions.operators.coreos.com "${sub_name}" -n "${sub_ns}" \
+            -o jsonpath='{.spec.source}' 2>/dev/null || echo "")
+        if [ "${current_source}" = "redhat-operators" ]; then
+            print_info "✓ Subscription source: redhat-operators"
+            return 0
+        fi
+        sleep 5
+        elapsed=$((elapsed + 5))
+    done
+
+    print_warn "Subscription source is still ${current_source:-unknown} after 90s (Argo CD may still be reverting)"
+    diagnose_rhacs_operator_catalog
+    return 1
+}
+
+# Ensure operator catalog can provide target RHACS (snapshot -> live, Argo CD drift fix).
+ensure_operator_catalog_for_upgrade() {
+    local current_source
+    current_source=$(get_rhacs_subscription_catalog_source 2>/dev/null || echo "")
+    current_source="${current_source%% *}"
+    if [[ "${current_source}" == *snapshot* ]]; then
+        ensure_live_redhat_operators_catalog || true
+    fi
 }
 
 # Max RHACS version available on a given OLM channel in the catalog (before install).
@@ -349,6 +608,11 @@ check_and_update_version() {
 
     local target_version="${RHACS_VERSION:-${RHACS_DEFAULT_VERSION}}"
     print_info "Target version: ${target_version} (default: ${RHACS_DEFAULT_VERSION})"
+
+    # Snapshot catalog + Argo CD: switch to live redhat-operators before channel/version work
+    if [ -n "$(get_rhacs_subscription_name)" ]; then
+        ensure_operator_catalog_for_upgrade
+    fi
     
     # Prefer subscription channel update (subscriptions.operators.coreos.com); fall back to CSV when no subscription
     if [ -n "$(get_rhacs_subscription_name)" ]; then
@@ -397,7 +661,9 @@ check_and_update_version() {
         if version_gt "${target_major_minor}" "${latest_major_minor}"; then
             print_warn "Target ${target_version} is not available on channel ${operator_channel} (catalog max: ${latest_version})"
             print_warn "Available operator channels: $(list_rhacs_operator_channels)"
-            print_warn "Skipping upgrade. Refresh the cluster catalog or set RHACS_AUTO_OPERATOR_CHANNEL=0 and RHACS_OPERATOR_CHANNEL=rhacs-${target_major_minor}"
+            ensure_live_redhat_operators_catalog || true
+            diagnose_rhacs_operator_catalog
+            print_warn "Skipping upgrade until the operator catalog provides ${target_major_minor}"
             print_info "Continuing setup with installed version: ${installed_version}"
             RHACS_VERSION_UPGRADE_SKIPPED=1
             return 0
@@ -575,7 +841,14 @@ ensure_subscription_channel_for_version() {
     if [ -z "${catalog_csv}" ]; then
         print_warn "Channel '${desired_channel}' not found in openshift-marketplace catalog"
         print_warn "Available channels: $(list_rhacs_operator_channels)"
-        return 1
+        ensure_live_redhat_operators_catalog && desired_channel=$(resolve_operator_channel_for_target "${target_version}")
+        catalog_csv=$(oc get packagemanifest rhacs-operator -n openshift-marketplace -o json 2>/dev/null \
+            | jq -r --arg ch "${desired_channel}" '.status.channels[] | select(.name == $ch) | .currentCSV' 2>/dev/null | head -1)
+        if [ -z "${catalog_csv}" ]; then
+            diagnose_rhacs_operator_catalog
+            return 1
+        fi
+        RHACS_RESOLVED_OPERATOR_CHANNEL="${desired_channel}"
     fi
     print_info "Catalog CSV for channel ${desired_channel}: ${catalog_csv} (${catalog_ver:-unknown})"
 

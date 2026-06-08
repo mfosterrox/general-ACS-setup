@@ -34,6 +34,8 @@ export ROX_CENTRAL_ADDRESS="https://central-stackrox.apps.<cluster-domain>"
 | `RHACS_CONSOLE_PLUGIN_NAME` | `advanced-cluster-security` | OpenShift Console security plugin |
 | `RHACS_ENSURE_CONSOLE_PLUGIN` | `1` | Enable Console security plugin after upgrade (set `0` to skip) |
 | `RHACS_SKIP_VERSION_UPDATE` | `0` | Set to `1` to skip version management |
+| `RHACS_USE_LIVE_CATALOG` | `1` | Auto-switch `redhat-operators-snapshot` → `redhat-operators` |
+| `RHACS_FIX_ARGOCD_CATALOG_DRIFT` | `1` | Patch Argo CD `ignoreDifferences` so GitOps does not revert catalog source |
 | `RHACS_OPERATOR_CSV_WAIT_SEC` | `600` | Wait for operator CSV to reach target before Central wait |
 | `RHACS_CENTRAL_UPGRADE_WAIT_SEC` | `600` | Wait for Central deployment to reach target version |
 | `RHACS_FORCE_DOWNGRADE` | `false` | Allow downgrade to older version |

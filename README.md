@@ -56,6 +56,9 @@ git pull origin main
 | `RHACS_DEFAULT_VERSION` | No | `4.10` | Default upgrade target when `RHACS_VERSION` is unset |
 | `RHACS_OPERATOR_CHANNEL` | No | `stable` | Preferred OLM channel; auto-resolution tries `rhacs-X.Y` when `stable` lags |
 | `RHACS_AUTO_OPERATOR_CHANNEL` | No | `1` | Auto-pick best channel for `RHACS_VERSION` (e.g. `rhacs-4.10` when `stable` is 4.9.2) |
+| `RHACS_USE_LIVE_CATALOG` | No | `1` | Switch subscription from `redhat-operators-snapshot` to live `redhat-operators` (set `0` to disable) |
+| `RHACS_FIX_ARGOCD_CATALOG_DRIFT` | No | `1` | Patch Argo CD app `ignoreDifferences` so GitOps does not revert catalog source (set `0` to disable) |
+| `RHACS_ARGOCD_APP_NAMESPACE` | No | auto | Namespace of Argo CD Application CR (default: discover, fallback `openshift-gitops`) |
 | `RHACS_OPERATOR_NAMESPACE` | No | `openshift-operators` | Where to find the subscription (AllNamespaces installs) |
 | `RHACS_SUBSCRIPTION_SEARCH_NAMESPACES` | No | `openshift-operators stackrox rhacs-operator` | Subscription discovery order |
 | `RHACS_USE_VERSION_PINNED_CHANNEL` | No | `0` | Set to `1` to force `rhacs-X.Y` only |
@@ -146,6 +149,86 @@ oc get route parasol-insurance -n parasol-insurance -o jsonpath='https://{.spec.
 ```bash
 source ~/.bashrc
 ./install.sh
+```
+
+### RHACS 4.10 not in the operator channel list (console stuck at 4.9.2)
+
+If the RHACS Operator subscription shows channels only through **4.9** (`rhacs-4.8`, `rhacs-4.9`, `stable` → `rhacs-operator.v4.9.2`), the cluster **operator catalog** does not yet expose 4.10 — patching `channel: rhacs-4.10` will not work.
+
+**Check what the catalog actually offers:**
+
+```bash
+oc get packagemanifest rhacs-operator -n openshift-marketplace -o json \
+  | jq -r '.status.channels[] | "\(.name) -> \(.currentCSV)"'
+oc get subscription rhacs-operator -n openshift-operators -o yaml | grep -E 'source:|channel:|installPlanApproval'
+```
+
+**Common fixes (OpenShift settings):**
+
+| Setting | Symptom | Fix |
+|---------|---------|-----|
+| **Snapshot catalog** (`source: redhat-operators-snapshot`) | Channels frozen at 4.9.x; no `rhacs-4.10` in console | Switch to live catalog `redhat-operators` |
+| **Manual update approval** (`installPlanApproval: Manual`) | Update appears but never applies | Approve InstallPlan in console, or set `Automatic` |
+| **Default catalogs disabled** (`OperatorHub.disableAllDefaultSources: true`) | Missing operators/channels | Re-enable default sources |
+
+**Switch from snapshot to live Red Hat catalog:**
+
+```bash
+oc patch subscription rhacs-operator -n openshift-operators --type=merge -p '{
+  "spec": {
+    "source": "redhat-operators",
+    "sourceNamespace": "openshift-marketplace",
+    "channel": "stable",
+    "installPlanApproval": "Automatic"
+  }
+}'
+
+# Refresh catalog pods after switching
+oc delete pod -n openshift-marketplace -l olm.catalogSource=redhat-operators
+
+# Verify rhacs-4.10 or stable now offers 4.10.x
+oc get packagemanifest rhacs-operator -n openshift-marketplace -o json \
+  | jq -r '.status.channels[] | select(.name=="stable" or .name=="rhacs-4.10") | "\(.name) -> \(.currentCSV)"'
+```
+
+`./install.sh` applies this automatically by default: switches snapshot → `redhat-operators`, patches the Argo CD `acs` app `ignoreDifferences`, then proceeds with the RHACS upgrade.
+
+To disable: `export RHACS_USE_LIVE_CATALOG=0` and/or `export RHACS_FIX_ARGOCD_CATALOG_DRIFT=0`.
+
+**Argo CD (Git still recommended):** The install script patches the Argo CD Application so subscription `spec.source` / `channel` drift is ignored. For a fully Git-native fix, also update the Subscription in the `acs` app repo:
+
+```yaml
+# In the acs Argo CD app manifest repo — Subscription rhacs-operator
+spec:
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace
+  channel: stable
+  installPlanApproval: Automatic
+```
+
+Then sync the `acs` application. To patch on-cluster temporarily:
+
+```bash
+argocd app set acs --sync-policy none    # pause auto-sync
+oc patch subscription rhacs-operator -n openshift-operators --type=merge -p '...'
+# after upgrade, re-enable sync and commit the Git change
+```
+
+**Live catalog still shows 4.9.2:** If `stable -> rhacs-operator.v4.9.2` even after switching source, the cluster `redhat-operators` index may not include 4.10 yet. Check OpenShift version and catalog image:
+
+```bash
+oc get clusterversion version -o jsonpath='{.status.desired.version}{"\n"}'
+oc get catalogsource redhat-operators -n openshift-marketplace -o jsonpath='{.spec.image}{"\n"}'
+oc get packagemanifest rhacs-operator -n openshift-marketplace -o json \
+  | jq -r '.status.channels[] | "\(.name) -> \(.currentCSV)"' | sort
+```
+
+RHACS 4.10 console features need **OCP 4.19+**; the operator catalog index is also tied to the OpenShift release.
+
+Run catalog diagnostics only:
+
+```bash
+bash basic-setup/diagnose-operator-catalog.sh
 ```
 
 ### OpenShift Console security plugin not showing
