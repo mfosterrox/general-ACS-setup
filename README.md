@@ -73,6 +73,7 @@ git pull origin main
 | `SKIP_PARASOL_INSURANCE` | No | `0` | Set to `1` to skip only Parasol Insurance |
 | `PARASOL_IMAGE` | No | `quay.io/jfalkner1/parasol-insurance:latest` | Parasol Insurance container image |
 | `PARASOL_NAMESPACE` | No | `parasol-insurance` | Namespace for Parasol Insurance |
+| `PARASOL_CONTAINER_PORT` | No | `8080` | Container HTTP port (`jfalkner1/parasol-insurance` is Quarkus on 8080) |
 | `ALLOW_PASSWORD_TOKEN_GEN` | No | `0` | Deprecated: generate token from `ROX_PASSWORD` if token missing |
 
 ## Setup Scripts

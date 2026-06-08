@@ -11,7 +11,7 @@
 # Overrides:
 #   PARASOL_IMAGE          (default: quay.io/jfalkner1/parasol-insurance:latest)
 #   PARASOL_NAMESPACE      (default: parasol-insurance)
-#   PARASOL_CONTAINER_PORT (default: 9090)
+#   PARASOL_CONTAINER_PORT (default: 8080 — quay.io/jfalkner1/parasol-insurance exposes 8080)
 #   PARASOL_CREATE_ROUTE   (default: 1)
 #
 
@@ -36,7 +36,7 @@ setup_rerun_register "${BASH_SOURCE[0]}" "$@"
 
 PARASOL_IMAGE="${PARASOL_IMAGE:-quay.io/jfalkner1/parasol-insurance:latest}"
 PARASOL_NAMESPACE="${PARASOL_NAMESPACE:-parasol-insurance}"
-PARASOL_CONTAINER_PORT="${PARASOL_CONTAINER_PORT:-9090}"
+PARASOL_CONTAINER_PORT="${PARASOL_CONTAINER_PORT:-8080}"
 PARASOL_CREATE_ROUTE="${PARASOL_CREATE_ROUTE:-1}"
 PARASOL_ROLLOUT_WAIT_SEC="${PARASOL_ROLLOUT_WAIT_SEC:-600}"
 
@@ -104,13 +104,10 @@ deploy_parasol_insurance() {
         "parasol-insurance=${PARASOL_IMAGE}" \
         -n "${PARASOL_NAMESPACE}" >/dev/null
 
-    if [ "${PARASOL_CONTAINER_PORT}" != "9090" ]; then
-        oc patch deployment parasol-insurance -n "${PARASOL_NAMESPACE}" --type=json -p="[
-            {\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/ports/0/containerPort\",\"value\":${PARASOL_CONTAINER_PORT}},
-            {\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/readinessProbe/httpGet/port\",\"value\":\"http\"},
-            {\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/livenessProbe/httpGet/port\",\"value\":\"http\"}
-        ]" >/dev/null 2>&1 || warn "Could not patch container port to ${PARASOL_CONTAINER_PORT}"
-    fi
+    # Image quay.io/jfalkner1/parasol-insurance is Quarkus on 8080 (not 9090).
+    oc patch deployment parasol-insurance -n "${PARASOL_NAMESPACE}" --type=json -p="[
+        {\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/ports/0/containerPort\",\"value\":${PARASOL_CONTAINER_PORT}}
+    ]" >/dev/null 2>&1 || warn "Could not patch container port to ${PARASOL_CONTAINER_PORT}"
 
     if [ "${PARASOL_CREATE_ROUTE}" != "1" ]; then
         oc delete route parasol-insurance -n "${PARASOL_NAMESPACE}" --ignore-not-found >/dev/null 2>&1 || true
